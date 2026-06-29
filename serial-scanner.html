@@ -113,6 +113,15 @@
   .del{background:none;color:var(--bad);font-size:20px;line-height:1;padding:4px 8px;font-weight:700}
   .empty{padding:28px 16px;color:var(--ink-2);font-size:14px;text-align:center}
 
+  /* ---- debug / log ---- */
+  details.dbg{margin:14px 16px 0;border:1px solid var(--line);background:#fff}
+  details.dbg summary{padding:12px 14px;font-family:var(--mono);font-size:12px;letter-spacing:.06em;cursor:pointer;list-style:none}
+  details.dbg summary::-webkit-details-marker{display:none}
+  details.dbg[open] summary{border-bottom:1px solid var(--line)}
+  .dbgbody{padding:14px}
+  .dbgsub{font-size:12px;color:var(--ink-2);margin:0 0 10px;line-height:1.5}
+  #logBtn{font-family:var(--mono);font-size:14px;font-weight:700;padding:11px 14px;border:2px solid var(--ink);background:var(--ink);color:var(--paper);cursor:pointer;width:100%}
+
   /* ---- manual ---- */
   .manual{display:flex;gap:8px;margin:14px 16px 0}
   .manual input{flex:1;font-family:var(--mono);font-size:16px;padding:11px;border:2px solid var(--ink);text-transform:uppercase}
@@ -174,6 +183,14 @@
     <button id="manualBtn">＋</button>
   </div>
 
+  <details class="dbg">
+    <summary>▸ Debug / log voor diagnose</summary>
+    <div class="dbgbody">
+      <p class="dbgsub">Start de camera, richt enkele seconden op het serienummer (op donkere én blauwe achtergrond), en download dan het log. Stuur het bestand door — het bevat de laatste camerabeelden + ruwe OCR zodat het probleem opgespoord kan worden.</p>
+      <button id="logBtn">Log downloaden</button>
+    </div>
+  </details>
+
   <div class="listhead">
     <h2>Gescand</h2>
   </div>
@@ -207,6 +224,11 @@
   var WINDOW = 8, NEED = 3; // accept once NEED of the last WINDOW frames agree
   var forceInvert = false;  // alternated each frame to try both screen polarities
   var audioCtx = null;
+
+  // debug log (downloadable, to share for diagnosis)
+  var logFrames = [];       // ring buffer of {raw, proc, text, serial, inv, ts}
+  var logEntries = [];      // text-only history of OCR attempts
+  var LOG_FRAMES = 6, LOG_ENTRIES = 80;
 
   var $ = function(id){ return document.getElementById(id); };
   var video = $("video"), stage = $("stage"), work = $("work");
@@ -397,6 +419,70 @@
     return "";
   }
 
+  // ---------- debug log ----------
+  // grab the raw (unprocessed) reticle band exactly as the OCR sees it
+  function grabRawBand(){
+    var vw = video.videoWidth, vh = video.videoHeight;
+    if(!vw || !vh) return null;
+    var cx = 0.07*vw, cw = 0.86*vw, cy = 0.40*vh, ch = 0.20*vh;
+    var c = document.createElement("canvas");
+    c.width = Math.round(cw); c.height = Math.round(ch);
+    c.getContext("2d").drawImage(video, cx, cy, cw, ch, 0, 0, c.width, c.height);
+    return c;
+  }
+  function snapshot(src){
+    if(!src) return null;
+    var c = document.createElement("canvas");
+    c.width = src.width; c.height = src.height;
+    c.getContext("2d").drawImage(src, 0, 0);
+    return c;
+  }
+  function logFrame(rawC, procC, text, serial, inv){
+    var ts = new Date().toISOString();
+    logFrames.push({ raw: rawC, proc: procC, text: text, serial: serial, inv: inv, ts: ts });
+    while(logFrames.length > LOG_FRAMES) logFrames.shift();
+    logEntries.push({ ts: ts, inv: inv, serial: serial, raw: text });
+    while(logEntries.length > LOG_ENTRIES) logEntries.shift();
+  }
+  function downloadLog(){
+    var meta = "tijd: " + new Date().toISOString() +
+      "\nuserAgent: " + navigator.userAgent +
+      "\nvideo: " + (video.videoWidth||"?") + " x " + (video.videoHeight||"?") +
+      "\nframes: " + logFrames.length + "  pogingen: " + logEntries.length;
+    var rows = logEntries.slice().reverse().map(function(e){
+      return "<tr><td>"+escapeHtml(e.ts)+"</td><td>"+(e.inv?"inv":"norm")+
+        "</td><td><b>"+escapeHtml(e.serial||"—")+"</b></td><td>"+escapeHtml(e.raw||"")+"</td></tr>";
+    }).join("");
+    var frames = logFrames.slice().reverse().map(function(f, i){
+      var rawSrc = f.raw ? f.raw.toDataURL("image/png") : "";
+      var procSrc = f.proc ? f.proc.toDataURL("image/png") : "";
+      return "<div class=f><div class=cap>#"+i+" "+escapeHtml(f.ts)+" ["+(f.inv?"inv":"norm")+
+        "] SN="+escapeHtml(f.serial||"—")+" &nbsp; raw="+escapeHtml(f.text||"")+"</div>"+
+        "<div>ruw beeld:<br><img src='"+rawSrc+"'></div>"+
+        "<div>verwerkt:<br><img src='"+procSrc+"'></div></div>";
+    }).join("");
+    var html = "<!doctype html><meta charset=utf-8><title>SerialScanner log</title>"+
+      "<style>body{font-family:monospace;padding:16px;max-width:900px;margin:0 auto}"+
+      "img{max-width:100%;border:1px solid #ccc;image-rendering:pixelated}"+
+      "table{border-collapse:collapse;font-size:12px;width:100%}"+
+      "td,th{border:1px solid #ccc;padding:3px 6px;vertical-align:top;text-align:left}"+
+      ".f{margin:18px 0;border-top:2px solid #000;padding-top:8px}"+
+      ".cap{font-size:12px;word-break:break-all;margin-bottom:6px}</style>"+
+      "<h1>Serial Scanner — debug log</h1><pre>"+escapeHtml(meta)+"</pre>"+
+      "<h2>OCR-pogingen (nieuwste eerst)</h2>"+
+      "<table><tr><th>tijd</th><th>pol</th><th>SN</th><th>ruwe OCR</th></tr>"+rows+"</table>"+
+      "<h2>Laatste frames</h2>"+frames;
+    var blob = new Blob([html], { type: "text/html" });
+    var d = new Date(), pad = function(n){ return (n<10?"0":"")+n; };
+    var name = "serialscanner-log-"+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+
+               "-"+pad(d.getHours())+pad(d.getMinutes())+pad(d.getSeconds())+".html";
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+    toast("Log gedownload (" + logFrames.length + " frames)");
+  }
+
   // ---------- auto-scan loop ----------
   function startLoop(){
     if(looping) return;
@@ -409,12 +495,17 @@
     if(!looping) return;
     if(!workerReady || busy){ setTimeout(tick, 200); return; }
     forceInvert = !forceInvert;          // alternate polarity each frame
+    var rawBand = grabRawBand();
     var canvas = grabProcessed();
     if(!canvas){ setTimeout(tick, 200); return; }
     busy = true;
+    var inv = forceInvert;
     worker.recognize(canvas).then(function(res){
       busy = false;
-      handleReading(extractSerial((res.data.text||"").trim()), (res.data.text||"").trim());
+      var raw = (res.data.text||"").trim();
+      var serial = extractSerial(raw);
+      logFrame(rawBand, snapshot(canvas), raw, serial, inv);
+      handleReading(serial, raw);
       if(looping) setTimeout(tick, 120);
     }).catch(function(e){
       busy = false; console.error(e);
@@ -541,6 +632,11 @@
     if(confirm("Alle "+rows.length+" gescande regels wissen? (Download eerst je CSV als je die nog nodig hebt.)")){
       rows=[]; save(); render(); toast("Lijst gewist");
     }
+  });
+
+  $("logBtn").addEventListener("click", function(){
+    if(!logFrames.length){ toast("Nog geen frames — start de camera en scan eerst even"); return; }
+    downloadLog();
   });
 
   $("batch").addEventListener("input", save);
