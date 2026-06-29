@@ -5,18 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Serial Scanner — PaddleOCR</title>
 <script type="module">
-  // PaddleOCR (Paddle.js) — text detection + recognition in the browser.
-  // Models download from a CDN on first init (a few MB, then cached).
+  // PaddleOCR (PP-OCRv5, English) via ppu-paddle-ocr + ONNX Runtime Web.
+  // Engine is bundled locally (paddle-engine.js, same origin); the ORT wasm
+  // loads from jsDelivr and the ONNX models from GitHub — all CORS-clean.
+  // engine:"canvas" avoids the heavy OpenCV dependency.
   window.__ocrStatus = "loading";
   try{
-    // jsDelivr's esbuild "+esm" bundle is browser-ready (esm.sh's build leaked a
-    // bare CommonJS `module` reference → "module is not defined").
-    const ocr = await import("https://cdn.jsdelivr.net/npm/@paddlejs-models/ocr@1.1.1/+esm");
-    await ocr.init();
-    window.__ocr = ocr;
+    await import("./paddle-engine.js");                 // sets window.PPUOCR
+    const { PaddleOcrService, MODEL_PRESETS } = window.PPUOCR;
+    const svc = new PaddleOcrService({
+      model: MODEL_PRESETS["v5-en-mobile"],
+      processing: { engine: "canvas" }
+    });
+    await svc.initialize();
+    window.__ocr = svc;
     window.__ocrStatus = "ready";
   }catch(e){
-    window.__ocrStatus = "error"; window.__ocrErr = String(e && e.message || e);
+    window.__ocrStatus = "error"; window.__ocrErr = String((e && e.message) || e);
     console.error("PaddleOCR init failed:", e);
   }
 </script>
@@ -730,27 +735,15 @@
     });
   }
 
-  // Run PaddleOCR on a canvas; returns the joined recognised text.
+  // Run PaddleOCR on the band canvas; returns the recognised text.
   function paddleRecognize(canvas){
     if(!window.__ocr || !window.__ocr.recognize){ return Promise.resolve(""); }
-    return canvasToImage(canvas).then(function(im){
-      return window.__ocr.recognize(im);
-    }).then(function(res){
+    return window.__ocr.recognize(canvas).then(function(res){
       if(!res) return "";
       if(typeof res === "string") return res;
       if(Array.isArray(res.text)) return res.text.join(" ");
       if(typeof res.text === "string") return res.text;
       return "";
-    });
-  }
-  function canvasToImage(canvas){
-    return new Promise(function(resolve, reject){
-      try{
-        var im = new Image();
-        im.onload = function(){ resolve(im); };
-        im.onerror = reject;
-        im.src = canvas.toDataURL("image/png");
-      }catch(e){ reject(e); }
     });
   }
 
