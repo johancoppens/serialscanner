@@ -1,0 +1,918 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Serial Scanner — PaddleOCR</title>
+<script type="module">
+  // PaddleOCR (Paddle.js) — text detection + recognition in the browser.
+  // Models download from a CDN on first init (a few MB, then cached).
+  window.__ocrStatus = "loading";
+  try{
+    const ocr = await import("https://esm.sh/@paddlejs-models/ocr@1.1.1");
+    await ocr.init();
+    window.__ocr = ocr;
+    window.__ocrStatus = "ready";
+  }catch(e){
+    window.__ocrStatus = "error"; window.__ocrErr = String(e && e.message || e);
+    console.error("PaddleOCR init failed:", e);
+  }
+</script>
+<style>
+  :root{
+    --ink:#15140f;          /* near-black, warm */
+    --ink-2:#4a463b;        /* muted label */
+    --paper:#f3efe6;        /* warm light data surface */
+    --paper-2:#e7e1d3;      /* divider / chip */
+    --viewport:#161512;     /* dark camera zone */
+    --amber:#ffb000;        /* signal amber — the signature */
+    --amber-dim:#a8741f;
+    --good:#2f7d4f;
+    --bad:#c0392b;
+    --line:#cfc7b5;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    font-family:var(--sans);
+    background:var(--paper);
+    color:var(--ink);
+    -webkit-text-size-adjust:100%;
+    padding-bottom:96px; /* room for sticky action bar */
+  }
+  .wrap{max-width:540px;margin:0 auto}
+
+  /* ---- top bar ---- */
+  .topbar{
+    position:sticky;top:0;z-index:30;
+    display:flex;align-items:baseline;justify-content:space-between;
+    gap:12px;padding:14px 16px 12px;
+    background:var(--viewport);color:var(--paper);
+    border-bottom:2px solid var(--amber);
+  }
+  .brand{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--amber)}
+  .count{font-family:var(--mono);font-size:22px;line-height:1;font-weight:600}
+  .count small{color:var(--ink-2);color:#9a9486;font-size:13px;font-weight:400}
+
+  /* ---- batch field ---- */
+  .batch{
+    position:sticky;top:46px;z-index:20;
+    background:var(--paper);padding:12px 16px 10px;border-bottom:1px solid var(--line);
+  }
+  .label{display:block;font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-2);margin-bottom:6px}
+  .batch input{
+    width:100%;font-family:var(--mono);font-size:18px;font-weight:600;
+    padding:11px 12px;border:2px solid var(--ink);border-radius:0;background:#fff;color:var(--ink);
+  }
+  .batch input:focus{outline:3px solid var(--amber);outline-offset:0}
+
+  /* ---- scanner viewport ---- */
+  .scanner{background:var(--viewport);padding:16px}
+  /* thin window: shows only the camera band around the scanbox.
+     The full .stage is kept intact (so reticle ↔ OCR crop stay aligned) and
+     simply clipped + shifted up so the 32%-68% slice is visible. */
+  .scanwin{position:relative;width:100%;aspect-ratio:1 / 0.27;overflow:hidden;background:#000;border:1px solid #2a2823}
+  .scanwin .stage{position:absolute;top:0;left:0;border:0;transform:translateY(-32%)}
+  .stage{width:100%;aspect-ratio:4/3;background:#000;overflow:hidden}
+  .stage video{width:100%;height:100%;object-fit:cover;display:block}
+  .stage.idle .reticle{display:none}
+  .reticle{
+    position:absolute;left:23%;width:54%;top:40%;height:20%;
+    border:2px solid var(--amber);box-shadow:0 0 0 100vmax rgba(0,0,0,.35);
+    pointer-events:none;
+  }
+  .reticle::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;background:var(--amber);
+    animation:sweep 1.8s ease-in-out infinite;opacity:.9}
+  @keyframes sweep{0%{top:0}50%{top:calc(100% - 2px)}100%{top:0}}
+  .placeholder{
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;
+    color:#8c867a;font-family:var(--mono);font-size:13px;letter-spacing:.04em;padding:24px;line-height:1.6;
+  }
+  .hint{margin:10px 2px 0;font-family:var(--mono);font-size:11px;color:#8c867a;letter-spacing:.03em;text-align:center}
+
+  /* ---- buttons ---- */
+  .btnrow{display:flex;gap:10px;margin-top:12px}
+  button{font-family:var(--sans);cursor:pointer;border:0;border-radius:0}
+  .btn{
+    flex:1;padding:15px 14px;font-size:16px;font-weight:700;letter-spacing:.01em;
+    background:var(--amber);color:var(--ink);border:2px solid var(--amber);
+  }
+  .btn:active{transform:translateY(1px)}
+  .btn[disabled]{opacity:.45;cursor:not-allowed}
+  .btn.ghost{background:transparent;color:var(--paper);border-color:#46423a}
+  .btn.dark{background:#2a2823;color:var(--paper);border-color:#2a2823}
+
+  /* ---- zoom ---- */
+  .zoomrow{display:flex;align-items:center;gap:10px;margin:12px 2px 0}
+  .zoomlbl,.zoomval{font-family:var(--mono);font-size:12px;color:#cdbf9a;flex:none}
+  .zoomval{min-width:34px;text-align:right}
+  .zoomrow input[type=range]{flex:1;accent-color:var(--amber);height:24px}
+
+  /* ---- live status ---- */
+  .live{display:flex;align-items:center;gap:8px;margin:10px 2px 0;font-family:var(--mono);font-size:12px;color:#cdbf9a;min-height:18px}
+  .live .dot{width:9px;height:9px;border-radius:50%;background:#555;flex:none}
+  .live.active .dot{background:var(--amber);animation:pulse 1.1s ease-in-out infinite}
+  .live.hit .dot{background:var(--good);animation:none}
+  @keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}
+
+  /* ---- list ---- */
+  .listhead{display:flex;align-items:center;justify-content:space-between;padding:18px 16px 8px}
+  .listhead h2{margin:0;font-size:13px;font-family:var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-2)}
+  .row{
+    display:flex;align-items:center;gap:10px;padding:11px 16px;border-top:1px solid var(--line);background:var(--paper);
+  }
+  .row.dupe{background:#f7e3df}
+  .row .serial{font-family:var(--mono);font-size:16px;font-weight:600;letter-spacing:.03em;flex:1;min-width:0;word-break:break-all;cursor:pointer;text-decoration:underline dotted var(--line);text-underline-offset:3px}
+  .chip{font-family:var(--mono);font-size:11px;background:var(--paper-2);padding:3px 8px;white-space:nowrap}
+  .tag{font-family:var(--mono);font-size:10px;padding:2px 6px;letter-spacing:.06em}
+  .tag.o{background:#efe9da;color:var(--ink-2)}
+  .tag.m{background:#dff0e5;color:var(--good)}
+  .tag.h{background:#fdecc6;color:var(--amber-dim)}
+  .del{background:none;color:var(--bad);font-size:20px;line-height:1;padding:4px 8px;font-weight:700}
+  .empty{padding:28px 16px;color:var(--ink-2);font-size:14px;text-align:center}
+
+  /* ---- debug / log ---- */
+  details.dbg{margin:14px 16px 0;border:1px solid var(--line);background:#fff}
+  details.dbg summary{padding:12px 14px;font-family:var(--mono);font-size:12px;letter-spacing:.06em;cursor:pointer;list-style:none}
+  details.dbg summary::-webkit-details-marker{display:none}
+  details.dbg[open] summary{border-bottom:1px solid var(--line)}
+  .dbgbody{padding:14px}
+  .dbgsub{font-size:12px;color:var(--ink-2);margin:0 0 10px;line-height:1.5}
+  #logBtn{font-family:var(--mono);font-size:14px;font-weight:700;padding:11px 14px;border:2px solid var(--ink);background:var(--ink);color:var(--paper);cursor:pointer;width:100%}
+  #refText{width:100%;min-height:90px;font-family:var(--mono);font-size:13px;padding:10px;border:1px solid var(--line);resize:vertical}
+  .refbtns{display:flex;gap:8px;margin-top:8px}
+  .reffile,#refApply{font-family:var(--mono);font-size:13px;font-weight:700;padding:10px 12px;border:2px solid var(--ink);cursor:pointer;text-align:center}
+  .reffile{background:#fff;color:var(--ink)}
+  #refApply{background:var(--ink);color:var(--paper);flex:1}
+  .refstat{font-family:var(--mono);font-size:12px;color:var(--good);margin:8px 0 0}
+
+  /* ---- manual ---- */
+  .manual{display:flex;gap:8px;margin:14px 16px 0}
+  .manual input{flex:1;font-family:var(--mono);font-size:16px;padding:11px;border:2px solid var(--ink);text-transform:uppercase}
+  .manual button{padding:0 16px;font-weight:700;background:var(--ink);color:var(--paper)}
+
+  /* ---- sticky action bar ---- */
+  .actionbar{
+    position:fixed;left:0;right:0;bottom:0;z-index:40;
+    display:flex;gap:10px;padding:12px 16px;max-width:540px;margin:0 auto;
+    background:var(--viewport);border-top:2px solid var(--amber);
+    padding-bottom:calc(12px + env(safe-area-inset-bottom));
+  }
+  .actionbar .btn{flex:2}
+  .actionbar .btn.minor{flex:1;background:transparent;color:var(--paper);border-color:#46423a;font-weight:600}
+
+  .toast{
+    position:fixed;left:50%;bottom:90px;transform:translateX(-50%);z-index:50;
+    background:var(--ink);color:var(--paper);font-family:var(--mono);font-size:13px;
+    padding:10px 16px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90%;text-align:center;
+  }
+  .toast.show{opacity:1}
+
+  @media (prefers-reduced-motion: reduce){
+    .reticle::before{animation:none;top:50%}
+    .btn:active{transform:none}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <span class="brand">Serial&nbsp;Scanner · Paddle</span>
+    <span class="count" id="count">0 <small id="countSub">gescand</small></span>
+  </div>
+
+  <div class="batch">
+    <label class="label" for="batch">Huidige bestemming / batch</label>
+    <input id="batch" placeholder="bv. Locatie A — Antwerpen" autocomplete="off">
+  </div>
+
+  <div class="scanner">
+    <div class="scanwin">
+      <div class="stage idle" id="stage">
+        <video id="video" playsinline muted></video>
+        <div class="reticle"></div>
+        <div class="placeholder" id="placeholder">Camera uit — tik op “Camera starten”.</div>
+      </div>
+    </div>
+    <p class="hint" id="hint">Vul het kader met “SN:…” (zoom desnoods in). Toevoegen gebeurt automatisch.</p>
+    <div class="btnrow">
+      <button class="btn dark" id="camBtn">Camera starten</button>
+    </div>
+    <div class="zoomrow" id="zoomRow" hidden>
+      <span class="zoomlbl">Zoom</span>
+      <input type="range" id="zoom" min="1" max="5" step="0.1" value="1">
+      <span class="zoomval" id="zoomVal">1×</span>
+    </div>
+    <div class="live" id="live"><span class="dot"></span><span id="liveText">Camera uit</span></div>
+  </div>
+
+  <div class="manual">
+    <input id="manualInput" placeholder="Of typ serienummer…" autocomplete="off" spellcheck="false">
+    <button id="manualBtn">＋</button>
+  </div>
+
+  <details class="dbg" id="refPanel">
+    <summary>▸ Referentielijst koppelen (Admin Console export) — lost 0/O, 3/S op</summary>
+    <div class="dbgbody">
+      <p class="dbgsub">Plak hier je serienummers uit de Google Admin Console-export (één per regel of CSV). Elke scan wordt dan automatisch naar het dichtstbijzijnde bekende serienummer “geklikt”, zodat OCR-foutjes (0/O, 3/S) vanzelf juist komen.</p>
+      <textarea id="refText" placeholder="5CD124PXZL&#10;PF3JF0NA&#10;…"></textarea>
+      <div class="refbtns">
+        <label class="reffile">CSV/TXT kiezen<input type="file" id="refFile" accept=".csv,.txt" hidden></label>
+        <button id="refApply">Lijst laden</button>
+      </div>
+      <p class="refstat" id="refStat"></p>
+    </div>
+  </details>
+
+  <details class="dbg">
+    <summary>▸ Debug / log voor diagnose</summary>
+    <div class="dbgbody">
+      <p class="dbgsub">Start de camera, richt enkele seconden op het serienummer (op donkere én blauwe achtergrond), en download dan het log. Stuur het bestand door — het bevat de laatste camerabeelden + ruwe OCR zodat het probleem opgespoord kan worden.</p>
+      <button id="logBtn">Log downloaden</button>
+    </div>
+  </details>
+
+  <div class="listhead">
+    <h2>Gescand</h2>
+  </div>
+  <div id="list"></div>
+
+</div>
+
+<div class="actionbar">
+  <button class="btn" id="csvBtn">CSV downloaden</button>
+  <button class="btn minor" id="clearBtn">Wissen</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<canvas id="work" hidden></canvas>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------- state ----------
+  var STORE_KEY = "cb-serial-scanner-v1";
+  var rows = [];            // {serial, batch, source, raw, ts, matched}
+  var master = [];          // normalized reference serials
+  var masterRaw = [];       // original reference serials
+  var MATCH_MIN = 0.6;      // min similarity to snap an OCR read to a known serial
+  var ZOOM_KEY = "cb-serial-scanner-zoom";
+  var worker = null, workerReady = false, stream = null, videoTrack = null;
+
+  // auto-scan + consensus voting
+  var looping = false, busy = false;
+  var recent = [];          // last WINDOW extracted serials ("" = blank frame)
+  var lastAccepted = null;  // suppress re-adding the same serial while it stays in view
+  var blankStreak = 0;
+  var WINDOW = 8, NEED = 3; // accept once NEED of the last WINDOW frames agree
+  var audioCtx = null;
+  var sharpHist = [];       // recent focus measures → skip relatively blurry frames
+
+  // debug log (downloadable, to share for diagnosis)
+  var logFrames = [];       // frames where a serial WAS read (most useful)
+  var logOther = [];        // a few recent non-empty-but-no-serial frames
+  var logEntries = [];      // text-only history of every OCR attempt
+  var LOG_FRAMES = 6, LOG_OTHER = 3, LOG_ENTRIES = 80;
+
+  var $ = function(id){ return document.getElementById(id); };
+  var video = $("video"), stage = $("stage"), work = $("work");
+
+  // ---------- safe persistence (degrades silently) ----------
+  function save(){
+    try{
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        rows: rows, batch: $("batch").value, masterRaw: masterRaw
+      }));
+    }catch(e){ /* storage unavailable — in-memory only */ }
+  }
+  function load(){
+    try{
+      var raw = localStorage.getItem(STORE_KEY);
+      if(!raw) return;
+      var d = JSON.parse(raw);
+      if(d.rows) rows = d.rows;
+      if(d.batch) $("batch").value = d.batch;
+      if(d.masterRaw && d.masterRaw.length) setMaster(d.masterRaw);
+    }catch(e){ /* ignore */ }
+  }
+
+  // ---------- helpers ----------
+  function norm(s){ return (s||"").toUpperCase().replace(/[^A-Z0-9]/g,""); }
+
+  function toast(msg){
+    var t = $("toast"); t.textContent = msg; t.classList.add("show");
+    clearTimeout(toast._t); toast._t = setTimeout(function(){ t.classList.remove("show"); }, 1800);
+  }
+
+  function updateCount(){
+    $("count").firstChild.nodeValue = rows.length + " ";
+    $("countSub").textContent = masterRaw.length ? ("/ " + masterRaw.length) : "gescand";
+  }
+
+  // ---------- reference list (Admin Console export) ----------
+  // Levenshtein distance
+  function lev(a, b){
+    var m = a.length, n = b.length, i, j;
+    if(!m) return n; if(!n) return m;
+    var prev = new Array(n+1), cur = new Array(n+1);
+    for(j = 0; j <= n; j++) prev[j] = j;
+    for(i = 1; i <= m; i++){
+      cur[0] = i;
+      for(j = 1; j <= n; j++){
+        var cost = a.charCodeAt(i-1) === b.charCodeAt(j-1) ? 0 : 1;
+        cur[j] = Math.min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost);
+      }
+      var tmp = prev; prev = cur; cur = tmp;
+    }
+    return prev[n];
+  }
+  // closest reference serial for an OCR read → {serial, score} or null
+  function bestMatch(ocr){
+    var q = norm(ocr);
+    if(!q || !master.length) return null;
+    var best = null, bestScore = -1, second = -1;
+    for(var i = 0; i < master.length; i++){
+      var m = master[i];
+      var d = lev(q, m);
+      var score = 1 - d / (Math.max(q.length, m.length) || 1);
+      if(score > bestScore){ second = bestScore; bestScore = score; best = masterRaw[i]; }
+      else if(score > second){ second = score; }
+    }
+    return { serial: best, score: bestScore, margin: bestScore - second };
+  }
+  function parseMaster(text){
+    var out = [];
+    text.split(/[\r\n]+/).forEach(function(line){
+      var cells = line.split(/[;,\t]/), picked = "";
+      for(var i = 0; i < cells.length; i++){
+        var c = cells[i].trim();
+        if(/[A-Za-z0-9]{5,}/.test(c)){ picked = c; break; }
+      }
+      if(!picked) picked = line.trim();
+      if(picked && norm(picked).length >= 4) out.push(picked.trim());
+    });
+    return out;
+  }
+  function setMaster(arr){
+    masterRaw = arr.slice();
+    master = arr.map(norm);
+    if($("refStat")) $("refStat").textContent = master.length + " serienummers geladen — matching staat aan.";
+    if($("refText") && !$("refText").value) $("refText").value = masterRaw.join("\n");
+    updateCount();
+  }
+
+  // ---------- camera ----------
+  $("camBtn").addEventListener("click", function(){
+    if(stream){ stopCam(); } else { startCam(); }
+  });
+
+  function startCam(){
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      toast("Camera niet beschikbaar (HTTPS nodig)"); return;
+    }
+    navigator.mediaDevices.getUserMedia({
+      video:{ facingMode:{ ideal:"environment" }, width:{ ideal:2560 }, height:{ ideal:1440 } },
+      audio:false
+    }).then(function(s){
+      stream = s; video.srcObject = s; video.play();
+      stage.classList.remove("idle");
+      $("placeholder").style.display="none";
+      $("camBtn").textContent = "Camera uit";
+      setupZoom(s);
+      initWorker();
+      startLoop();
+    }).catch(function(err){
+      toast("Geen cameratoegang");
+      console.error(err);
+    });
+  }
+  function stopCam(){
+    stopLoop();
+    if(stream){ stream.getTracks().forEach(function(t){ t.stop(); }); stream=null; }
+    videoTrack = null;
+    video.srcObject=null;
+    stage.classList.add("idle");
+    $("placeholder").style.display="flex";
+    $("camBtn").textContent = "Camera starten";
+    $("zoomRow").hidden = true;
+    setLive("Camera uit", "");
+  }
+
+  // ---------- camera zoom (Android Chrome supports it on many devices) ----------
+  function setupZoom(s){
+    videoTrack = s.getVideoTracks()[0];
+    var caps = videoTrack.getCapabilities ? videoTrack.getCapabilities() : null;
+    // continuous autofocus keeps the text sharp (where supported)
+    if(caps && caps.focusMode && caps.focusMode.indexOf("continuous") >= 0){
+      try{ videoTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] }); }catch(e){}
+    }
+    if(!caps || !caps.zoom){ $("zoomRow").hidden = true; return; }
+    var z = $("zoom");
+    z.min = caps.zoom.min; z.max = caps.zoom.max;
+    z.step = caps.zoom.step || ((caps.zoom.max - caps.zoom.min) / 50) || 0.1;
+    // restore last zoom, else start a bit zoomed in (serials are small)
+    var saved = parseFloat(localStorage.getItem(ZOOM_KEY));
+    var start = (!isNaN(saved) && saved >= caps.zoom.min && saved <= caps.zoom.max)
+      ? saved : Math.min(caps.zoom.max, caps.zoom.min + (caps.zoom.max - caps.zoom.min) * 0.4);
+    z.value = start;
+    $("zoomRow").hidden = false;
+    applyZoom(start);
+  }
+  function applyZoom(v){
+    if(!videoTrack) return;
+    $("zoomVal").textContent = (Math.round(v * 10) / 10) + "×";
+    try{ videoTrack.applyConstraints({ advanced: [{ zoom: v }] }); }catch(e){ /* ignore */ }
+    try{ localStorage.setItem(ZOOM_KEY, String(v)); }catch(e){}
+  }
+  $("zoom").addEventListener("input", function(){ applyZoom(parseFloat(this.value)); });
+
+  // ---------- live status ----------
+  function setLive(text, mode){
+    $("liveText").textContent = text;
+    $("live").className = "live" + (mode ? " " + mode : "");
+  }
+  function beep(){
+    try{
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = "sine"; o.frequency.value = 880;
+      g.gain.value = 0.08;
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(); o.stop(audioCtx.currentTime + 0.12);
+    }catch(e){ /* audio optional */ }
+  }
+
+  // ---------- OCR engine (PaddleOCR via Paddle.js) ----------
+  function initWorker(){
+    if(workerReady) return;
+    setLive("PaddleOCR laden… (eenmalig, even geduld)", "active");
+    var poll = setInterval(function(){
+      if(window.__ocrStatus === "ready"){
+        clearInterval(poll); workerReady = true;
+        setLive("Auto-scan actief — vul kader met “SN:…”", "active");
+      }else if(window.__ocrStatus === "error"){
+        clearInterval(poll);
+        setLive("PaddleOCR kon niet laden — gebruik handmatige invoer", "");
+      }
+    }, 300);
+  }
+
+  // PaddleOCR does its own text detection + preprocessing (incl. OpenCV-style
+  // ops), so we just hand it the reticle band (colour). We still compute a
+  // sharpness measure so blurry frames are skipped before the costly OCR.
+  function grabProcessed(){
+    var vw = video.videoWidth, vh = video.videoHeight;
+    if(!vw || !vh) return null;
+    var cx = 0.23*vw, cw = 0.54*vw, cy = 0.40*vh, ch = 0.20*vh;
+    work.width = Math.round(cw); work.height = Math.round(ch);
+    var ctx = work.getContext("2d");
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(video, cx, cy, cw, ch, 0, 0, work.width, work.height);
+    var dw = work.width, dh = work.height;
+    var img = ctx.getImageData(0, 0, dw, dh), p = img.data;
+    var g2 = new Float32Array(dw*dh), i, j, x, y, cc, lap = 0, lapN = 0;
+    for(i = 0, j = 0; i < p.length; i += 4, j++){ g2[j] = 0.299*p[i] + 0.587*p[i+1] + 0.114*p[i+2]; }
+    for(y = 1; y < dh-1; y++){
+      for(x = 1; x < dw-1; x++){
+        cc = 4*g2[y*dw+x] - g2[(y-1)*dw+x] - g2[(y+1)*dw+x] - g2[y*dw+x-1] - g2[y*dw+x+1];
+        lap += cc*cc; lapN++;
+      }
+    }
+    grabProcessed.lastSharp = lapN ? lap / lapN : 0;
+    grabProcessed.lastInvert = false;
+    return work;
+  }
+
+  // (old tesseract binariser kept below, unused, for reference)
+  function grabProcessedOLD(){
+    var vw = video.videoWidth, vh = video.videoHeight;
+    if(!vw || !vh) return null;
+    var cx = 0.23*vw, cw = 0.54*vw, cy = 0.40*vh, ch = 0.20*vh;
+
+    // native band with a light blur to tame screen speckle/moiré
+    var tmp = grabProcessed._tmp || (grabProcessed._tmp = document.createElement("canvas"));
+    var bw = Math.round(cw), bh = Math.round(ch);
+    tmp.width = bw; tmp.height = bh;
+    var tctx = tmp.getContext("2d");
+    tctx.filter = "blur(1px)";
+    tctx.drawImage(video, cx, cy, cw, ch, 0, 0, bw, bh);
+    tctx.filter = "none";
+
+    // grayscale of the band
+    var bd = tctx.getImageData(0, 0, bw, bh).data;
+    var gray = new Float32Array(bw * bh), i, j, x, y;
+    for(i = 0, j = 0; i < bd.length; i += 4, j++){
+      gray[j] = 0.299*bd[i] + 0.587*bd[i+1] + 0.114*bd[i+2];
+    }
+
+    // locate the text row: a text row has MANY edges across its width; a row
+    // crossing only the bezel/screen border has just one strong edge. So we
+    // COUNT edge pixels per row (not sum magnitudes) — robust to the dark bezel.
+    var rowE = new Float64Array(bh), base, s, d;
+    for(y = 0; y < bh; y++){
+      base = y*bw; s = 0;
+      for(x = 1; x < bw; x++){ d = gray[base+x] - gray[base+x-1]; if(d < 0) d = -d; if(d > 15) s++; }
+      rowE[y] = s;
+    }
+    var sm = new Float64Array(bh), R = 4, acc, cnt, k, yy;
+    for(y = 0; y < bh; y++){
+      acc = 0; cnt = 0;
+      for(k = -R; k <= R; k++){ yy = y+k; if(yy >= 0 && yy < bh){ acc += rowE[yy]; cnt++; } }
+      sm[y] = acc / cnt;
+    }
+    var peak = 0, pv = -1;
+    for(y = 0; y < bh; y++){ if(sm[y] > pv){ pv = sm[y]; peak = y; } }
+    var top = peak, bot = peak, rthr = pv * 0.35;
+    while(top > 0 && sm[top] > rthr) top--;
+    while(bot < bh-1 && sm[bot] > rthr) bot++;
+    var pad = Math.round((bot - top) * 0.4);
+    top = Math.max(0, top - pad); bot = Math.min(bh, bot + pad);
+    var rowH = bot - top;
+    if(rowH < 6){ top = 0; bot = bh; rowH = bh; }   // fallback: whole band
+
+    // upscale the cropped row to ~88px tall (good for tesseract)
+    var scale = 88 / rowH; if(scale > 3) scale = 3; if(scale < 0.5) scale = 0.5;
+    var dw = Math.max(1, Math.round(bw * scale)), dh = Math.max(1, Math.round(rowH * scale));
+    work.width = dw; work.height = dh;
+    var ctx = work.getContext("2d");
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(tmp, 0, top, bw, rowH, 0, 0, dw, dh);
+
+    // grayscale of the cropped row
+    var img = ctx.getImageData(0, 0, dw, dh), p = img.data, n = dw*dh, gi;
+    var g2 = new Float32Array(n);
+    for(i = 0, j = 0; i < p.length; i += 4, j++){
+      g2[j] = 0.299*p[i] + 0.587*p[i+1] + 0.114*p[i+2];
+    }
+
+    // sharpness (focus) measure on the row: mean squared Laplacian.
+    // Lower when the frame is motion-blurred / out of focus → tick skips OCR.
+    var lap = 0, lapN = 0, cc;
+    for(yy = 1; yy < dh-1; yy++){
+      for(xx = 1; xx < dw-1; xx++){
+        cc = 4*g2[yy*dw+xx] - g2[(yy-1)*dw+xx] - g2[(yy+1)*dw+xx] - g2[yy*dw+xx-1] - g2[yy*dw+xx+1];
+        lap += cc*cc; lapN++;
+      }
+    }
+    grabProcessed.lastSharp = lapN ? lap / lapN : 0;
+
+    // adaptive (local-mean) threshold via integral image, applied in BOTH
+    // directions; we keep whichever marks more "ink" — that's where the text
+    // is. Polarity-invariant: handles dark-on-light (blue screen) AND
+    // light-on-dark screens, and the local mean ignores the bezel gradient.
+    var W = dw + 1;
+    var integ = new Float64Array(W * (dh + 1));
+    var yy, xx, rs;
+    for(yy = 0; yy < dh; yy++){
+      rs = 0;
+      for(xx = 0; xx < dw; xx++){ rs += g2[yy*dw + xx]; integ[(yy+1)*W + (xx+1)] = integ[yy*W + (xx+1)] + rs; }
+    }
+    var win = Math.max(15, Math.round(dh * 0.6) | 1), half = win >> 1, C = 10;
+    var state = new Uint8Array(n), darkN = 0, lightN = 0, idx = 0, lm;
+    for(yy = 0; yy < dh; yy++){
+      var y0 = yy-half < 0 ? 0 : yy-half, y1 = yy+half >= dh ? dh-1 : yy+half;
+      for(xx = 0; xx < dw; xx++, idx++){
+        var x0 = xx-half < 0 ? 0 : xx-half, x1 = xx+half >= dw ? dw-1 : xx+half;
+        lm = (integ[(y1+1)*W+(x1+1)] - integ[y0*W+(x1+1)] - integ[(y1+1)*W+x0] + integ[y0*W+x0]) / ((x1-x0+1)*(y1-y0+1));
+        if(g2[idx] < lm - C){ state[idx] = 1; darkN++; }
+        else if(g2[idx] > lm + C){ state[idx] = 2; lightN++; }
+      }
+    }
+    var useDark = darkN >= lightN, want = useDark ? 1 : 2;
+    grabProcessed.lastInvert = !useDark;
+    for(gi = 0, i = 0; gi < n; gi++, i += 4){
+      var vv = state[gi] === want ? 0 : 255;
+      p[i] = p[i+1] = p[i+2] = vv; p[i+3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    return work;
+  }
+
+  // Pull the serial that follows "SN:" (tolerating SN/SH/SM and :/. misreads).
+  // Falls back to the "ADID:" value, which on these screens equals the SN.
+  function extractSerial(text){
+    var t = (text || "").toUpperCase();
+    var m = t.match(/S[NHM][\s:.\-]*([A-Z0-9]{6,})/);
+    if(m) return m[1];
+    m = t.match(/ADID[\s:.\-]*([A-Z0-9]{6,})/);
+    if(m) return m[1];
+    // no SN:/ADID: anchor (narrow box on just the serial) → take longest token
+    var toks = t.replace(/[^A-Z0-9]+/g, " ").trim().split(/\s+/).filter(function(x){ return x.length >= 6; });
+    if(toks.length){ toks.sort(function(a, b){ return b.length - a.length; }); return toks[0]; }
+    return "";
+  }
+
+  // ---------- debug log ----------
+  // grab the raw (unprocessed) reticle band exactly as the OCR sees it
+  function grabRawBand(){
+    var vw = video.videoWidth, vh = video.videoHeight;
+    if(!vw || !vh) return null;
+    var cx = 0.23*vw, cw = 0.54*vw, cy = 0.40*vh, ch = 0.20*vh;
+    var c = document.createElement("canvas");
+    c.width = Math.round(cw); c.height = Math.round(ch);
+    c.getContext("2d").drawImage(video, cx, cy, cw, ch, 0, 0, c.width, c.height);
+    return c;
+  }
+  function snapshot(src){
+    if(!src) return null;
+    var c = document.createElement("canvas");
+    c.width = src.width; c.height = src.height;
+    c.getContext("2d").drawImage(src, 0, 0);
+    return c;
+  }
+  function logFrame(rawC, procC, text, serial, inv){
+    var ts = new Date().toISOString();
+    logEntries.push({ ts: ts, inv: inv, serial: serial, raw: text });
+    while(logEntries.length > LOG_ENTRIES) logEntries.shift();
+    var frame = { raw: rawC, proc: procC, text: text, serial: serial, inv: inv, ts: ts };
+    // keep the frames that actually read a serial; otherwise a few recent
+    // non-empty frames — so the download isn't just trailing blank frames.
+    if(serial){
+      logFrames.push(frame);
+      while(logFrames.length > LOG_FRAMES) logFrames.shift();
+    }else if(text){
+      logOther.push(frame);
+      while(logOther.length > LOG_OTHER) logOther.shift();
+    }
+  }
+  function downloadLog(){
+    var allFrames = logFrames.concat(logOther);
+    var meta = "tijd: " + new Date().toISOString() +
+      "\nuserAgent: " + navigator.userAgent +
+      "\nvideo: " + (video.videoWidth||"?") + " x " + (video.videoHeight||"?") +
+      "\nframes met serial: " + logFrames.length + "  overige frames: " + logOther.length +
+      "  pogingen: " + logEntries.length;
+    var rows = logEntries.slice().reverse().map(function(e){
+      return "<tr><td>"+escapeHtml(e.ts)+"</td><td>"+(e.inv?"inv":"norm")+
+        "</td><td><b>"+escapeHtml(e.serial||"—")+"</b></td><td>"+escapeHtml(e.raw||"")+"</td></tr>";
+    }).join("");
+    var frames = allFrames.slice().reverse().map(function(f, i){
+      var rawSrc = f.raw ? f.raw.toDataURL("image/png") : "";
+      var procSrc = f.proc ? f.proc.toDataURL("image/png") : "";
+      return "<div class=f><div class=cap>#"+i+" "+escapeHtml(f.ts)+" ["+(f.inv?"inv":"norm")+
+        "] SN="+escapeHtml(f.serial||"—")+" &nbsp; raw="+escapeHtml(f.text||"")+"</div>"+
+        "<div>ruw beeld:<br><img src='"+rawSrc+"'></div>"+
+        "<div>verwerkt:<br><img src='"+procSrc+"'></div></div>";
+    }).join("");
+    var html = "<!doctype html><meta charset=utf-8><title>SerialScanner log</title>"+
+      "<style>body{font-family:monospace;padding:16px;max-width:900px;margin:0 auto}"+
+      "img{max-width:100%;border:1px solid #ccc;image-rendering:pixelated}"+
+      "table{border-collapse:collapse;font-size:12px;width:100%}"+
+      "td,th{border:1px solid #ccc;padding:3px 6px;vertical-align:top;text-align:left}"+
+      ".f{margin:18px 0;border-top:2px solid #000;padding-top:8px}"+
+      ".cap{font-size:12px;word-break:break-all;margin-bottom:6px}</style>"+
+      "<h1>Serial Scanner — debug log</h1><pre>"+escapeHtml(meta)+"</pre>"+
+      "<h2>OCR-pogingen (nieuwste eerst)</h2>"+
+      "<table><tr><th>tijd</th><th>pol</th><th>SN</th><th>ruwe OCR</th></tr>"+rows+"</table>"+
+      "<h2>Laatste frames</h2>"+frames;
+    var blob = new Blob([html], { type: "text/html" });
+    var d = new Date(), pad = function(n){ return (n<10?"0":"")+n; };
+    var name = "serialscanner-log-"+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+
+               "-"+pad(d.getHours())+pad(d.getMinutes())+pad(d.getSeconds())+".html";
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+    toast("Log gedownload (" + allFrames.length + " frames)");
+  }
+
+  // ---------- auto-scan loop ----------
+  function startLoop(){
+    if(looping) return;
+    looping = true; recent = []; lastAccepted = null; blankStreak = 0; sharpHist = [];
+    tick();
+  }
+  function stopLoop(){ looping = false; }
+
+  function tick(){
+    if(!looping) return;
+    if(!workerReady || busy){ setTimeout(tick, 200); return; }
+    var rawBand = grabRawBand();
+    var canvas = grabProcessed();
+    if(!canvas){ setTimeout(tick, 200); return; }
+
+    // skip relatively blurry frames: only OCR when sharpness is near the
+    // recent best (acts like stabilisation — never reads a smeared frame)
+    var S = grabProcessed.lastSharp || 0;
+    sharpHist.push(S); if(sharpHist.length > 14) sharpHist.shift();
+    var mx = 0; for(var si = 0; si < sharpHist.length; si++){ if(sharpHist[si] > mx) mx = sharpHist[si]; }
+    if(sharpHist.length >= 5 && S < 0.5 * mx){
+      setLive("Houd stil — scherpstellen…", "active");
+      if(looping) setTimeout(tick, 70);
+      return;
+    }
+
+    busy = true;
+    var procShot = snapshot(canvas);   // snapshot now; canvas is reused by paddle
+    paddleRecognize(canvas).then(function(raw){
+      busy = false;
+      raw = (raw || "").trim();
+      var serial = extractSerial(raw);
+      logFrame(rawBand, procShot, raw, serial, false);
+      handleReading(serial, raw);
+      if(looping) setTimeout(tick, 120);
+    }).catch(function(e){
+      busy = false; console.error(e);
+      if(looping) setTimeout(tick, 300);
+    });
+  }
+
+  // Run PaddleOCR on a canvas; returns the joined recognised text.
+  function paddleRecognize(canvas){
+    if(!window.__ocr || !window.__ocr.recognize){ return Promise.resolve(""); }
+    return canvasToImage(canvas).then(function(im){
+      return window.__ocr.recognize(im);
+    }).then(function(res){
+      if(!res) return "";
+      if(typeof res === "string") return res;
+      if(Array.isArray(res.text)) return res.text.join(" ");
+      if(typeof res.text === "string") return res.text;
+      return "";
+    });
+  }
+  function canvasToImage(canvas){
+    return new Promise(function(resolve, reject){
+      try{
+        var im = new Image();
+        im.onload = function(){ resolve(im); };
+        im.onerror = reject;
+        im.src = canvas.toDataURL("image/png");
+      }catch(e){ reject(e); }
+    });
+  }
+
+  function handleReading(serial, raw){
+    var matched = false;
+    // snap the OCR read to the nearest known serial so 0/O, 3/S etc. are fixed
+    if(serial && master.length){
+      var m = bestMatch(serial);
+      if(m && m.score >= MATCH_MIN){ serial = norm(m.serial); matched = true; }
+    }
+
+    recent.push(serial);
+    if(recent.length > WINDOW) recent.shift();
+
+    if(!serial){
+      if(++blankStreak >= 3) lastAccepted = null;  // device left view → allow re-add
+      var snip = (raw || "").replace(/\s+/g, " ").trim();
+      setLive(snip ? ("OCR: " + snip.slice(0, 24)) : "Zoeken naar “SN:…”", "active");
+      return;
+    }
+    blankStreak = 0;
+
+    var votes = 0;
+    for(var i = 0; i < recent.length; i++){ if(recent[i] === serial) votes++; }
+
+    if(serial === lastAccepted){
+      setLive((matched ? "✓ " : "") + "Al toegevoegd: " + serial, "hit");
+      return;
+    }
+    setLive((matched ? "✓ lijst: " : "Gelezen: ") + serial + "  (" + votes + "/" + NEED + ")", "active");
+
+    if(votes >= NEED){
+      lastAccepted = serial; recent = [];
+      autoAdd(serial, raw, matched);
+    }
+  }
+
+  function autoAdd(serial, raw, matched){
+    serial = norm(serial);
+    if(!serial) return;
+    addRow(serial, "ocr", raw, matched);
+    beep();
+    if(navigator.vibrate) navigator.vibrate(120);
+    setLive("✓ Toegevoegd: " + serial, "hit");
+    toast("✓ " + serial + " toegevoegd");
+  }
+
+  // ---------- manual ----------
+  $("manualBtn").addEventListener("click", manualAdd);
+  $("manualInput").addEventListener("keydown", function(e){ if(e.key==="Enter") manualAdd(); });
+  function manualAdd(){
+    var serial = norm($("manualInput").value);
+    if(!serial){ return; }
+    addRow(serial, "handmatig", "");
+    $("manualInput").value="";
+    toast("Toegevoegd: " + serial);
+  }
+
+  // ---------- rows ----------
+  function addRow(serial, source, raw, matched){
+    rows.unshift({
+      serial: serial, batch: $("batch").value.trim(),
+      source: source, raw: raw||"", matched: !!matched, ts: new Date().toISOString()
+    });
+    save(); render();
+  }
+  function delRow(idx){ rows.splice(idx,1); save(); render(); }
+  function editRow(idx){
+    var v = prompt("Serienummer corrigeren (bv. O→0, S→3):", rows[idx].serial);
+    if(v === null) return;
+    v = norm(v);
+    if(!v){ toast("Leeg — niet gewijzigd"); return; }
+    rows[idx].serial = v;
+    if(rows[idx].source === "ocr") rows[idx].source = "ocr-gecorrigeerd";
+    save(); render(); toast("Aangepast: " + v);
+  }
+
+  function isDupe(serial, idx){
+    for(var i=0;i<rows.length;i++){ if(i!==idx && rows[i].serial===serial) return true; }
+    return false;
+  }
+
+  function render(){
+    var list = $("list");
+    list.innerHTML="";
+    if(!rows.length){
+      list.innerHTML = '<p class="empty">Nog niets gescand. Start de camera en ga dichtbij “SN:…”. Tip: tik op een serienummer om het te corrigeren.</p>';
+      updateCount(); return;
+    }
+    rows.forEach(function(r, idx){
+      var row = document.createElement("div");
+      row.className = "row" + (isDupe(r.serial, idx) ? " dupe":"");
+      var tag = r.matched ? '<span class="tag m">✓ lijst</span>'
+              : (r.source==="handmatig" ? '<span class="tag h">handm.</span>'
+              : (r.source==="ocr-gecorrigeerd" ? '<span class="tag m">✎ ocr</span>' : '<span class="tag o">ocr</span>'));
+      var dupe = isDupe(r.serial, idx) ? '<span class="tag h">dubbel</span>' : '';
+      row.innerHTML =
+        '<span class="serial" title="tik om te corrigeren">'+escapeHtml(r.serial)+'</span>'+
+        (r.batch?'<span class="chip">'+escapeHtml(r.batch)+'</span>':'')+
+        tag + dupe +
+        '<button class="del" aria-label="verwijder">×</button>';
+      row.querySelector(".serial").addEventListener("click", function(){ editRow(idx); });
+      row.querySelector(".del").addEventListener("click", function(){ delRow(idx); });
+      list.appendChild(row);
+    });
+    updateCount();
+  }
+
+  function escapeHtml(s){ return (s||"").replace(/[&<>"']/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+
+  // ---------- CSV ----------
+  function csvCell(v){
+    v = (v==null?"":String(v));
+    return /[",\r\n;]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v;
+  }
+  $("csvBtn").addEventListener("click", function(){
+    if(!rows.length){ toast("Niets om te exporteren"); return; }
+    var header = ["serienummer","bestemming","bron","in_lijst","ocr_ruw","tijdstip"];
+    var lines = [header.join(",")];
+    // export oldest-first for readability
+    rows.slice().reverse().forEach(function(r){
+      lines.push([ csvCell(r.serial), csvCell(r.batch), csvCell(r.source),
+                   r.matched?"ja":"nee", csvCell(r.raw), csvCell(r.ts) ].join(","));
+    });
+    var blob = new Blob(["\uFEFF"+lines.join("\r\n")], {type:"text/csv;charset=utf-8"});
+    var d = new Date(), pad=function(n){return (n<10?"0":"")+n;};
+    var name = "chromebook-serials-"+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+
+               "-"+pad(d.getHours())+pad(d.getMinutes())+".csv";
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
+    toast(rows.length + " regels geëxporteerd");
+  });
+
+  $("clearBtn").addEventListener("click", function(){
+    if(!rows.length){ return; }
+    if(confirm("Alle "+rows.length+" gescande regels wissen? (Download eerst je CSV als je die nog nodig hebt.)")){
+      rows=[]; save(); render(); toast("Lijst gewist");
+    }
+  });
+
+  $("logBtn").addEventListener("click", function(){
+    if(!logFrames.length && !logOther.length){ toast("Nog geen frames — start de camera en scan eerst even"); return; }
+    downloadLog();
+  });
+
+  // ---------- reference list wiring ----------
+  $("refApply").addEventListener("click", function(){
+    var arr = parseMaster($("refText").value);
+    if(!arr.length){ toast("Geen serienummers gevonden"); return; }
+    setMaster(arr); save(); toast(arr.length + " geladen");
+  });
+  $("refFile").addEventListener("change", function(e){
+    var f = e.target.files[0]; if(!f) return;
+    var r = new FileReader();
+    r.onload = function(){ $("refText").value = r.result; };
+    r.readAsText(f);
+  });
+
+  $("batch").addEventListener("input", save);
+
+  // ---------- init ----------
+  load();
+  render();
+  if(!window.isSecureContext){
+    $("hint").textContent = "Let op: camera vereist HTTPS. Host dit bestand (bv. GitHub Pages).";
+  }
+})();
+</script>
+</body>
+</html>
