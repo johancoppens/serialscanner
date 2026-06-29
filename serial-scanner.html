@@ -437,11 +437,13 @@
       gray[j] = 0.299*bd[i] + 0.587*bd[i+1] + 0.114*bd[i+2];
     }
 
-    // locate the text row: rows of text have high horizontal-gradient energy
+    // locate the text row: a text row has MANY edges across its width; a row
+    // crossing only the bezel/screen border has just one strong edge. So we
+    // COUNT edge pixels per row (not sum magnitudes) — robust to the dark bezel.
     var rowE = new Float64Array(bh), base, s, d;
     for(y = 0; y < bh; y++){
       base = y*bw; s = 0;
-      for(x = 1; x < bw; x++){ d = gray[base+x] - gray[base+x-1]; s += d < 0 ? -d : d; }
+      for(x = 1; x < bw; x++){ d = gray[base+x] - gray[base+x-1]; if(d < 0) d = -d; if(d > 15) s++; }
       rowE[y] = s;
     }
     var sm = new Float64Array(bh), R = 4, acc, cnt, k, yy;
@@ -468,30 +470,39 @@
     ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
     ctx.drawImage(tmp, 0, top, bw, rowH, 0, 0, dw, dh);
 
-    // grayscale + global Otsu threshold
-    var img = ctx.getImageData(0, 0, dw, dh), p = img.data, n = dw*dh;
+    // grayscale of the cropped row
+    var img = ctx.getImageData(0, 0, dw, dh), p = img.data, n = dw*dh, gi;
     var g2 = new Float32Array(n);
     for(i = 0, j = 0; i < p.length; i += 4, j++){
       g2[j] = 0.299*p[i] + 0.587*p[i+1] + 0.114*p[i+2];
     }
-    var hist = new Float64Array(256), gi, t;
-    for(gi = 0; gi < n; gi++){ hist[g2[gi] & 255]++; }
-    var sumAll = 0; for(t = 0; t < 256; t++) sumAll += t * hist[t];
-    var wB = 0, sB = 0, maxv = -1, thr = 128, wF, mB, mF, bt;
-    for(t = 0; t < 256; t++){
-      wB += hist[t]; if(wB === 0) continue;
-      wF = n - wB; if(wF === 0) break;
-      sB += t * hist[t]; mB = sB/wB; mF = (sumAll - sB)/wF;
-      bt = wB * wF * (mB - mF) * (mB - mF);
-      if(bt > maxv){ maxv = bt; thr = t; }
+
+    // adaptive (local-mean) threshold via integral image, applied in BOTH
+    // directions; we keep whichever marks more "ink" — that's where the text
+    // is. Polarity-invariant: handles dark-on-light (blue screen) AND
+    // light-on-dark screens, and the local mean ignores the bezel gradient.
+    var W = dw + 1;
+    var integ = new Float64Array(W * (dh + 1));
+    var yy, xx, rs;
+    for(yy = 0; yy < dh; yy++){
+      rs = 0;
+      for(xx = 0; xx < dw; xx++){ rs += g2[yy*dw + xx]; integ[(yy+1)*W + (xx+1)] = integ[yy*W + (xx+1)] + rs; }
     }
-    // background is the majority class → make the minority (text) black
-    var dark = 0;
-    for(gi = 0; gi < n; gi++){ if(g2[gi] <= thr) dark++; }
-    var invert = dark > n - dark;
-    grabProcessed.lastInvert = invert;
+    var win = Math.max(15, Math.round(dh * 0.6) | 1), half = win >> 1, C = 10;
+    var state = new Uint8Array(n), darkN = 0, lightN = 0, idx = 0, lm;
+    for(yy = 0; yy < dh; yy++){
+      var y0 = yy-half < 0 ? 0 : yy-half, y1 = yy+half >= dh ? dh-1 : yy+half;
+      for(xx = 0; xx < dw; xx++, idx++){
+        var x0 = xx-half < 0 ? 0 : xx-half, x1 = xx+half >= dw ? dw-1 : xx+half;
+        lm = (integ[(y1+1)*W+(x1+1)] - integ[y0*W+(x1+1)] - integ[(y1+1)*W+x0] + integ[y0*W+x0]) / ((x1-x0+1)*(y1-y0+1));
+        if(g2[idx] < lm - C){ state[idx] = 1; darkN++; }
+        else if(g2[idx] > lm + C){ state[idx] = 2; lightN++; }
+      }
+    }
+    var useDark = darkN >= lightN, want = useDark ? 1 : 2;
+    grabProcessed.lastInvert = !useDark;
     for(gi = 0, i = 0; gi < n; gi++, i += 4){
-      var vv = ((g2[gi] <= thr) !== invert) ? 0 : 255;
+      var vv = state[gi] === want ? 0 : 255;
       p[i] = p[i+1] = p[i+2] = vv; p[i+3] = 255;
     }
     ctx.putImageData(img, 0, 0);
