@@ -258,6 +258,7 @@
   var blankStreak = 0;
   var WINDOW = 8, NEED = 3; // accept once NEED of the last WINDOW frames agree
   var audioCtx = null;
+  var sharpHist = [];       // recent focus measures → skip relatively blurry frames
 
   // debug log (downloadable, to share for diagnosis)
   var logFrames = [];       // frames where a serial WAS read (most useful)
@@ -393,6 +394,10 @@
   function setupZoom(s){
     videoTrack = s.getVideoTracks()[0];
     var caps = videoTrack.getCapabilities ? videoTrack.getCapabilities() : null;
+    // continuous autofocus keeps the text sharp (where supported)
+    if(caps && caps.focusMode && caps.focusMode.indexOf("continuous") >= 0){
+      try{ videoTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] }); }catch(e){}
+    }
     if(!caps || !caps.zoom){ $("zoomRow").hidden = true; return; }
     var z = $("zoom");
     z.min = caps.zoom.min; z.max = caps.zoom.max;
@@ -515,6 +520,17 @@
     for(i = 0, j = 0; i < p.length; i += 4, j++){
       g2[j] = 0.299*p[i] + 0.587*p[i+1] + 0.114*p[i+2];
     }
+
+    // sharpness (focus) measure on the row: mean squared Laplacian.
+    // Lower when the frame is motion-blurred / out of focus → tick skips OCR.
+    var lap = 0, lapN = 0, cc;
+    for(yy = 1; yy < dh-1; yy++){
+      for(xx = 1; xx < dw-1; xx++){
+        cc = 4*g2[yy*dw+xx] - g2[(yy-1)*dw+xx] - g2[(yy+1)*dw+xx] - g2[yy*dw+xx-1] - g2[yy*dw+xx+1];
+        lap += cc*cc; lapN++;
+      }
+    }
+    grabProcessed.lastSharp = lapN ? lap / lapN : 0;
 
     // adaptive (local-mean) threshold via integral image, applied in BOTH
     // directions; we keep whichever marks more "ink" — that's where the text
@@ -639,7 +655,7 @@
   // ---------- auto-scan loop ----------
   function startLoop(){
     if(looping) return;
-    looping = true; recent = []; lastAccepted = null; blankStreak = 0;
+    looping = true; recent = []; lastAccepted = null; blankStreak = 0; sharpHist = [];
     tick();
   }
   function stopLoop(){ looping = false; }
@@ -650,6 +666,18 @@
     var rawBand = grabRawBand();
     var canvas = grabProcessed();
     if(!canvas){ setTimeout(tick, 200); return; }
+
+    // skip relatively blurry frames: only OCR when sharpness is near the
+    // recent best (acts like stabilisation — never reads a smeared frame)
+    var S = grabProcessed.lastSharp || 0;
+    sharpHist.push(S); if(sharpHist.length > 14) sharpHist.shift();
+    var mx = 0; for(var si = 0; si < sharpHist.length; si++){ if(sharpHist[si] > mx) mx = sharpHist[si]; }
+    if(sharpHist.length >= 5 && S < 0.5 * mx){
+      setLive("Houd stil — scherpstellen…", "active");
+      if(looping) setTimeout(tick, 70);
+      return;
+    }
+
     busy = true;
     worker.recognize(canvas).then(function(res){
       busy = false;
