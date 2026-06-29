@@ -448,16 +448,20 @@
   }
 
   // ---------- OCR engine (PaddleOCR via Paddle.js) ----------
+  var pollStarted = false;
   function initWorker(){
-    if(workerReady) return;
+    if(workerReady || pollStarted) return;
+    pollStarted = true;
     setLive("PaddleOCR laden… (eenmalig, even geduld)", "active");
     var poll = setInterval(function(){
       if(window.__ocrStatus === "ready"){
         clearInterval(poll); workerReady = true;
-        setLive("Auto-scan actief — vul kader met “SN:…”", "active");
+        setLive("PaddleOCR klaar — start camera", "active");
       }else if(window.__ocrStatus === "error"){
-        clearInterval(poll);
-        setLive("PaddleOCR kon niet laden — gebruik handmatige invoer", "");
+        clearInterval(poll); pollStarted = false;
+        var msg = String(window.__ocrErr || "onbekende fout");
+        setLive("Paddle-fout: " + msg.slice(0, 80), "");
+        console.error("PaddleOCR error:", window.__ocrErr);
       }
     }, 300);
   }
@@ -645,6 +649,7 @@
     var meta = "tijd: " + new Date().toISOString() +
       "\nuserAgent: " + navigator.userAgent +
       "\nvideo: " + (video.videoWidth||"?") + " x " + (video.videoHeight||"?") +
+      "\npaddle: " + (window.__ocrStatus||"?") + (window.__ocrErr ? (" — " + window.__ocrErr) : "") +
       "\nframes met serial: " + logFrames.length + "  overige frames: " + logOther.length +
       "  pogingen: " + logEntries.length;
     var rows = logEntries.slice().reverse().map(function(e){
@@ -909,6 +914,7 @@
   // ---------- init ----------
   load();
   render();
+  initWorker();   // start loading PaddleOCR immediately so status/errors show pre-camera
   if(!window.isSecureContext){
     $("hint").textContent = "Let op: camera vereist HTTPS. Host dit bestand (bv. GitHub Pages).";
   }
