@@ -105,10 +105,11 @@
     display:flex;align-items:center;gap:10px;padding:11px 16px;border-top:1px solid var(--line);background:var(--paper);
   }
   .row.dupe{background:#f7e3df}
-  .row .serial{font-family:var(--mono);font-size:16px;font-weight:600;letter-spacing:.03em;flex:1;min-width:0;word-break:break-all}
+  .row .serial{font-family:var(--mono);font-size:16px;font-weight:600;letter-spacing:.03em;flex:1;min-width:0;word-break:break-all;cursor:pointer;text-decoration:underline dotted var(--line);text-underline-offset:3px}
   .chip{font-family:var(--mono);font-size:11px;background:var(--paper-2);padding:3px 8px;white-space:nowrap}
   .tag{font-family:var(--mono);font-size:10px;padding:2px 6px;letter-spacing:.06em}
   .tag.o{background:#efe9da;color:var(--ink-2)}
+  .tag.m{background:#dff0e5;color:var(--good)}
   .tag.h{background:#fdecc6;color:var(--amber-dim)}
   .del{background:none;color:var(--bad);font-size:20px;line-height:1;padding:4px 8px;font-weight:700}
   .empty{padding:28px 16px;color:var(--ink-2);font-size:14px;text-align:center}
@@ -592,6 +593,15 @@
     save(); render();
   }
   function delRow(idx){ rows.splice(idx,1); save(); render(); }
+  function editRow(idx){
+    var v = prompt("Serienummer corrigeren (bv. O→0, S→3):", rows[idx].serial);
+    if(v === null) return;
+    v = norm(v);
+    if(!v){ toast("Leeg — niet gewijzigd"); return; }
+    rows[idx].serial = v;
+    if(rows[idx].source === "ocr") rows[idx].source = "ocr-gecorrigeerd";
+    save(); render(); toast("Aangepast: " + v);
+  }
 
   function isDupe(serial, idx){
     for(var i=0;i<rows.length;i++){ if(i!==idx && rows[i].serial===serial) return true; }
@@ -602,19 +612,21 @@
     var list = $("list");
     list.innerHTML="";
     if(!rows.length){
-      list.innerHTML = '<p class="empty">Nog niets gescand. Stel een bestemming in, start de camera en richt op de “SN:”-regel.</p>';
+      list.innerHTML = '<p class="empty">Nog niets gescand. Start de camera en ga dichtbij “SN:…”. Tip: tik op een serienummer om het te corrigeren.</p>';
       updateCount(); return;
     }
     rows.forEach(function(r, idx){
       var row = document.createElement("div");
       row.className = "row" + (isDupe(r.serial, idx) ? " dupe":"");
-      var tag = r.source==="handmatig" ? '<span class="tag h">handm.</span>' : '<span class="tag o">ocr</span>';
+      var tag = r.source==="handmatig" ? '<span class="tag h">handm.</span>'
+              : (r.source==="ocr-gecorrigeerd" ? '<span class="tag m">✎ ocr</span>' : '<span class="tag o">ocr</span>');
       var dupe = isDupe(r.serial, idx) ? '<span class="tag h">dubbel</span>' : '';
       row.innerHTML =
-        '<span class="serial">'+escapeHtml(r.serial)+'</span>'+
+        '<span class="serial" title="tik om te corrigeren">'+escapeHtml(r.serial)+'</span>'+
         (r.batch?'<span class="chip">'+escapeHtml(r.batch)+'</span>':'')+
         tag + dupe +
         '<button class="del" aria-label="verwijder">×</button>';
+      row.querySelector(".serial").addEventListener("click", function(){ editRow(idx); });
       row.querySelector(".del").addEventListener("click", function(){ delRow(idx); });
       list.appendChild(row);
     });
