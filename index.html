@@ -60,8 +60,8 @@
   /* thin window: shows only the camera band ~5%-margin around the scanbox.
      The full .stage is kept intact (so reticle ↔ OCR crop stay aligned) and
      simply clipped + shifted up so the 35%-65% slice is visible. */
-  .scanwin{position:relative;width:100%;aspect-ratio:1 / 0.225;overflow:hidden;background:#000;border:1px solid #2a2823}
-  .scanwin .stage{position:absolute;top:0;left:0;border:0;transform:translateY(-35%)}
+  .scanwin{position:relative;width:100%;aspect-ratio:1 / 0.27;overflow:hidden;background:#000;border:1px solid #2a2823}
+  .scanwin .stage{position:absolute;top:0;left:0;border:0;transform:translateY(-32%)}
   .stage{width:100%;aspect-ratio:4/3;background:#000;overflow:hidden}
   .stage video{width:100%;height:100%;object-fit:cover;display:block}
   .stage.idle .reticle{display:none}
@@ -339,9 +339,35 @@
 
     // step 3 — grayscale
     var img = ctx.getImageData(0, 0, ow, oh), p = img.data;
-    var gray = new Float32Array(ow * oh);
+    var n = ow * oh;
+    var gray = new Float32Array(n);
     for(var i = 0, j = 0; i < p.length; i += 4, j++){
       gray[j] = 0.299*p[i] + 0.587*p[i+1] + 0.114*p[i+2];
+    }
+
+    // step 3b — auto polarity: works for dark-on-light AND light-on-dark
+    // screens. Otsu-split the band; if the dark class is the majority the
+    // background is dark (light text) → invert so it becomes dark-on-light,
+    // which is what the adaptive threshold below (and tesseract) expect.
+    var hist = new Float64Array(256), gi;
+    for(gi = 0; gi < n; gi++){ hist[gray[gi] & 255]++; }
+    var sumAll = 0, t;
+    for(t = 0; t < 256; t++){ sumAll += t * hist[t]; }
+    var wB = 0, sB = 0, maxv = -1, thr = 128;
+    for(t = 0; t < 256; t++){
+      wB += hist[t];
+      if(wB === 0) continue;
+      var wF = n - wB;
+      if(wF === 0) break;
+      sB += t * hist[t];
+      var mB = sB / wB, mF = (sumAll - sB) / wF;
+      var bt = wB * wF * (mB - mF) * (mB - mF);
+      if(bt > maxv){ maxv = bt; thr = t; }
+    }
+    var below = 0;
+    for(gi = 0; gi < n; gi++){ if(gray[gi] < thr) below++; }
+    if(below > n - below){
+      for(gi = 0; gi < n; gi++){ gray[gi] = 255 - gray[gi]; }
     }
 
     // step 4 — adaptive (local-mean) threshold via integral image; robust to
