@@ -204,7 +204,8 @@
   var recent = [];          // last WINDOW extracted serials ("" = blank frame)
   var lastAccepted = null;  // suppress re-adding the same serial while it stays in view
   var blankStreak = 0;
-  var WINDOW = 6, NEED = 3; // accept once NEED of the last WINDOW frames agree
+  var WINDOW = 8, NEED = 3; // accept once NEED of the last WINDOW frames agree
+  var forceInvert = false;  // alternated each frame to try both screen polarities
   var audioCtx = null;
 
   var $ = function(id){ return document.getElementById(id); };
@@ -345,29 +346,13 @@
       gray[j] = 0.299*p[i] + 0.587*p[i+1] + 0.114*p[i+2];
     }
 
-    // step 3b — auto polarity: works for dark-on-light AND light-on-dark
-    // screens. Otsu-split the band; if the dark class is the majority the
-    // background is dark (light text) → invert so it becomes dark-on-light,
-    // which is what the adaptive threshold below (and tesseract) expect.
-    var hist = new Float64Array(256), gi;
-    for(gi = 0; gi < n; gi++){ hist[gray[gi] & 255]++; }
-    var sumAll = 0, t;
-    for(t = 0; t < 256; t++){ sumAll += t * hist[t]; }
-    var wB = 0, sB = 0, maxv = -1, thr = 128;
-    for(t = 0; t < 256; t++){
-      wB += hist[t];
-      if(wB === 0) continue;
-      var wF = n - wB;
-      if(wF === 0) break;
-      sB += t * hist[t];
-      var mB = sB / wB, mF = (sumAll - sB) / wF;
-      var bt = wB * wF * (mB - mF) * (mB - mF);
-      if(bt > maxv){ maxv = bt; thr = t; }
-    }
-    var below = 0;
-    for(gi = 0; gi < n; gi++){ if(gray[gi] < thr) below++; }
-    if(below > n - below){
-      for(gi = 0; gi < n; gi++){ gray[gi] = 255 - gray[gi]; }
+    // step 3b — polarity: the adaptive threshold below expects dark-on-light.
+    // Screens come in both polarities and auto-detecting from one noisy frame
+    // is unreliable, so the loop alternates `forceInvert` every frame — one
+    // polarity reads the serial, the other yields nothing and is ignored by
+    // the consensus vote. Robust to dark- and light-background screens alike.
+    if(forceInvert){
+      for(var gi = 0; gi < n; gi++){ gray[gi] = 255 - gray[gi]; }
     }
 
     // step 4 — adaptive (local-mean) threshold via integral image; robust to
@@ -423,6 +408,7 @@
   function tick(){
     if(!looping) return;
     if(!workerReady || busy){ setTimeout(tick, 200); return; }
+    forceInvert = !forceInvert;          // alternate polarity each frame
     var canvas = grabProcessed();
     if(!canvas){ setTimeout(tick, 200); return; }
     busy = true;
@@ -442,7 +428,8 @@
 
     if(!serial){
       if(++blankStreak >= 3) lastAccepted = null;  // device left view → allow re-add
-      setLive("Zoeken naar “SN:…”", "active");
+      var snip = (raw || "").replace(/\s+/g, " ").trim();
+      setLive(snip ? ("OCR: " + snip.slice(0, 24)) : "Zoeken naar “SN:…”", "active");
       return;
     }
     blankStreak = 0;
