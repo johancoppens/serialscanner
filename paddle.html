@@ -461,6 +461,7 @@
         clearInterval(poll); pollStarted = false;
         var msg = String(window.__ocrErr || "onbekende fout");
         setLive("Paddle-fout: " + msg.slice(0, 80), "");
+        $("hint").textContent = "Paddle-fout: " + msg;
         console.error("PaddleOCR error:", window.__ocrErr);
       }
     }, 300);
@@ -892,8 +893,7 @@
   });
 
   $("logBtn").addEventListener("click", function(){
-    if(!logFrames.length && !logOther.length){ toast("Nog geen frames — start de camera en scan eerst even"); return; }
-    downloadLog();
+    downloadLog();   // always allowed — even with 0 frames the meta holds the paddle error
   });
 
   // ---------- reference list wiring ----------
