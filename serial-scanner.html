@@ -66,7 +66,7 @@
   .stage video{width:100%;height:100%;object-fit:cover;display:block}
   .stage.idle .reticle{display:none}
   .reticle{
-    position:absolute;left:7%;width:86%;top:40%;height:20%;
+    position:absolute;left:23%;width:54%;top:40%;height:20%;
     border:2px solid var(--amber);box-shadow:0 0 0 100vmax rgba(0,0,0,.35);
     pointer-events:none;
   }
@@ -90,6 +90,12 @@
   .btn[disabled]{opacity:.45;cursor:not-allowed}
   .btn.ghost{background:transparent;color:var(--paper);border-color:#46423a}
   .btn.dark{background:#2a2823;color:var(--paper);border-color:#2a2823}
+
+  /* ---- zoom ---- */
+  .zoomrow{display:flex;align-items:center;gap:10px;margin:12px 2px 0}
+  .zoomlbl,.zoomval{font-family:var(--mono);font-size:12px;color:#cdbf9a;flex:none}
+  .zoomval{min-width:34px;text-align:right}
+  .zoomrow input[type=range]{flex:1;accent-color:var(--amber);height:24px}
 
   /* ---- live status ---- */
   .live{display:flex;align-items:center;gap:8px;margin:10px 2px 0;font-family:var(--mono);font-size:12px;color:#cdbf9a;min-height:18px}
@@ -178,9 +184,14 @@
         <div class="placeholder" id="placeholder">Camera uit — tik op “Camera starten”.</div>
       </div>
     </div>
-    <p class="hint" id="hint">Ga dichtbij zodat “SN:…” groot en gecentreerd in het kader staat. Toevoegen gebeurt automatisch.</p>
+    <p class="hint" id="hint">Vul het kader met “SN:…” (zoom desnoods in). Toevoegen gebeurt automatisch.</p>
     <div class="btnrow">
       <button class="btn dark" id="camBtn">Camera starten</button>
+    </div>
+    <div class="zoomrow" id="zoomRow" hidden>
+      <span class="zoomlbl">Zoom</span>
+      <input type="range" id="zoom" min="1" max="5" step="0.1" value="1">
+      <span class="zoomval" id="zoomVal">1×</span>
     </div>
     <div class="live" id="live"><span class="dot"></span><span id="liveText">Camera uit</span></div>
   </div>
@@ -237,7 +248,8 @@
   var master = [];          // normalized reference serials
   var masterRaw = [];       // original reference serials
   var MATCH_MIN = 0.6;      // min similarity to snap an OCR read to a known serial
-  var worker = null, workerReady = false, stream = null;
+  var ZOOM_KEY = "cb-serial-scanner-zoom";
+  var worker = null, workerReady = false, stream = null, videoTrack = null;
 
   // auto-scan + consensus voting
   var looping = false, busy = false;
@@ -357,6 +369,7 @@
       stage.classList.remove("idle");
       $("placeholder").style.display="none";
       $("camBtn").textContent = "Camera uit";
+      setupZoom(s);
       initWorker();
       startLoop();
     }).catch(function(err){
@@ -367,12 +380,38 @@
   function stopCam(){
     stopLoop();
     if(stream){ stream.getTracks().forEach(function(t){ t.stop(); }); stream=null; }
+    videoTrack = null;
     video.srcObject=null;
     stage.classList.add("idle");
     $("placeholder").style.display="flex";
     $("camBtn").textContent = "Camera starten";
+    $("zoomRow").hidden = true;
     setLive("Camera uit", "");
   }
+
+  // ---------- camera zoom (Android Chrome supports it on many devices) ----------
+  function setupZoom(s){
+    videoTrack = s.getVideoTracks()[0];
+    var caps = videoTrack.getCapabilities ? videoTrack.getCapabilities() : null;
+    if(!caps || !caps.zoom){ $("zoomRow").hidden = true; return; }
+    var z = $("zoom");
+    z.min = caps.zoom.min; z.max = caps.zoom.max;
+    z.step = caps.zoom.step || ((caps.zoom.max - caps.zoom.min) / 50) || 0.1;
+    // restore last zoom, else start a bit zoomed in (serials are small)
+    var saved = parseFloat(localStorage.getItem(ZOOM_KEY));
+    var start = (!isNaN(saved) && saved >= caps.zoom.min && saved <= caps.zoom.max)
+      ? saved : Math.min(caps.zoom.max, caps.zoom.min + (caps.zoom.max - caps.zoom.min) * 0.4);
+    z.value = start;
+    $("zoomRow").hidden = false;
+    applyZoom(start);
+  }
+  function applyZoom(v){
+    if(!videoTrack) return;
+    $("zoomVal").textContent = (Math.round(v * 10) / 10) + "×";
+    try{ videoTrack.applyConstraints({ advanced: [{ zoom: v }] }); }catch(e){ /* ignore */ }
+    try{ localStorage.setItem(ZOOM_KEY, String(v)); }catch(e){}
+  }
+  $("zoom").addEventListener("input", function(){ applyZoom(parseFloat(this.value)); });
 
   // ---------- live status ----------
   function setLive(text, mode){
@@ -419,7 +458,7 @@
   function grabProcessed(){
     var vw = video.videoWidth, vh = video.videoHeight;
     if(!vw || !vh) return null;
-    var cx = 0.07*vw, cw = 0.86*vw, cy = 0.40*vh, ch = 0.20*vh;
+    var cx = 0.23*vw, cw = 0.54*vw, cy = 0.40*vh, ch = 0.20*vh;
 
     // native band with a light blur to tame screen speckle/moiré
     var tmp = grabProcessed._tmp || (grabProcessed._tmp = document.createElement("canvas"));
@@ -517,6 +556,9 @@
     if(m) return m[1];
     m = t.match(/ADID[\s:.\-]*([A-Z0-9]{6,})/);
     if(m) return m[1];
+    // no SN:/ADID: anchor (narrow box on just the serial) → take longest token
+    var toks = t.replace(/[^A-Z0-9]+/g, " ").trim().split(/\s+/).filter(function(x){ return x.length >= 6; });
+    if(toks.length){ toks.sort(function(a, b){ return b.length - a.length; }); return toks[0]; }
     return "";
   }
 
@@ -525,7 +567,7 @@
   function grabRawBand(){
     var vw = video.videoWidth, vh = video.videoHeight;
     if(!vw || !vh) return null;
-    var cx = 0.07*vw, cw = 0.86*vw, cy = 0.40*vh, ch = 0.20*vh;
+    var cx = 0.23*vw, cw = 0.54*vw, cy = 0.40*vh, ch = 0.20*vh;
     var c = document.createElement("canvas");
     c.width = Math.round(cw); c.height = Math.round(ch);
     c.getContext("2d").drawImage(video, cx, cy, cw, ch, 0, 0, c.width, c.height);
