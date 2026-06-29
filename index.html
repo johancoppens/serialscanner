@@ -57,7 +57,12 @@
 
   /* ---- scanner viewport ---- */
   .scanner{background:var(--viewport);padding:16px}
-  .stage{position:relative;width:100%;aspect-ratio:4/3;background:#000;overflow:hidden;border:1px solid #2a2823}
+  /* thin window: shows only the camera band ~5%-margin around the scanbox.
+     The full .stage is kept intact (so reticle ↔ OCR crop stay aligned) and
+     simply clipped + shifted up so the 35%-65% slice is visible. */
+  .scanwin{position:relative;width:100%;aspect-ratio:1 / 0.225;overflow:hidden;background:#000;border:1px solid #2a2823}
+  .scanwin .stage{position:absolute;top:0;left:0;border:0;transform:translateY(-35%)}
+  .stage{width:100%;aspect-ratio:4/3;background:#000;overflow:hidden}
   .stage video{width:100%;height:100%;object-fit:cover;display:block}
   .stage.idle .reticle{display:none}
   .reticle{
@@ -150,10 +155,12 @@
   </div>
 
   <div class="scanner">
-    <div class="stage idle" id="stage">
-      <video id="video" playsinline muted></video>
-      <div class="reticle"></div>
-      <div class="placeholder" id="placeholder">Camera uit.<br>Tik op “Camera starten” en richt<br>het vizier op de regel met <b>SN:</b>.</div>
+    <div class="scanwin">
+      <div class="stage idle" id="stage">
+        <video id="video" playsinline muted></video>
+        <div class="reticle"></div>
+        <div class="placeholder" id="placeholder">Camera uit — tik op “Camera starten”.</div>
+      </div>
     </div>
     <p class="hint" id="hint">Richt het vizier op de regel met “SN:…”. Toevoegen gebeurt automatisch.</p>
     <div class="btnrow">
