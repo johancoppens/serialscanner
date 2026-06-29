@@ -171,7 +171,7 @@
         <div class="placeholder" id="placeholder">Camera uit — tik op “Camera starten”.</div>
       </div>
     </div>
-    <p class="hint" id="hint">Richt het vizier op de regel met “SN:…”. Toevoegen gebeurt automatisch.</p>
+    <p class="hint" id="hint">Ga dichtbij zodat “SN:…” groot en gecentreerd in het kader staat. Toevoegen gebeurt automatisch.</p>
     <div class="btnrow">
       <button class="btn dark" id="camBtn">Camera starten</button>
     </div>
@@ -222,7 +222,6 @@
   var lastAccepted = null;  // suppress re-adding the same serial while it stays in view
   var blankStreak = 0;
   var WINDOW = 8, NEED = 3; // accept once NEED of the last WINDOW frames agree
-  var forceInvert = false;  // alternated each frame to try both screen polarities
   var audioCtx = null;
 
   // debug log (downloadable, to share for diagnosis)
@@ -274,7 +273,7 @@
       toast("Camera niet beschikbaar (HTTPS nodig)"); return;
     }
     navigator.mediaDevices.getUserMedia({
-      video:{ facingMode:{ ideal:"environment" }, width:{ ideal:1920 }, height:{ ideal:1080 } },
+      video:{ facingMode:{ ideal:"environment" }, width:{ ideal:2560 }, height:{ ideal:1440 } },
       audio:false
     }).then(function(s){
       stream = s; video.srcObject = s; video.play();
@@ -327,82 +326,96 @@
       });
     }).then(function(){
       workerReady = true;
-      setLive("Auto-scan actief — richt op “SN:…”", "active");
+      setLive("Auto-scan actief — ga dichtbij “SN:…”", "active");
     }).catch(function(e){
       setLive("OCR kon niet laden — gebruik handmatige invoer", "");
       console.error(e);
     });
   }
 
-  // Crop the reticle band, kill screen moiré (blur + downscale), then
-  // adaptive-threshold to crisp black/white text. Returns the work canvas.
-  // Tuned against real screen photos: photographing an LCD adds a fine grid
-  // pattern that destroys OCR unless we low-pass it away before thresholding.
+  // Turn the live reticle band into crisp black-on-white text for OCR.
+  // Validated against real phone captures: the serial is a thin line floating
+  // in a tall band full of empty screen/bezel, so we (1) locate the text row
+  // via per-row horizontal-gradient energy, (2) crop tight and upscale it to a
+  // comfortable OCR height, (3) Otsu-threshold and force text→black, which
+  // auto-handles both dark-on-light and light-on-dark screens in one pass.
   function grabProcessed(){
     var vw = video.videoWidth, vh = video.videoHeight;
     if(!vw || !vh) return null;
     var cx = 0.07*vw, cw = 0.86*vw, cy = 0.40*vh, ch = 0.20*vh;
 
-    // step 1 — blurred native-res crop (low-pass removes the screen grid)
+    // native band with a light blur to tame screen speckle/moiré
     var tmp = grabProcessed._tmp || (grabProcessed._tmp = document.createElement("canvas"));
-    tmp.width = Math.round(cw); tmp.height = Math.round(ch);
+    var bw = Math.round(cw), bh = Math.round(ch);
+    tmp.width = bw; tmp.height = bh;
     var tctx = tmp.getContext("2d");
-    tctx.filter = "blur(2px)";
-    tctx.drawImage(video, cx, cy, cw, ch, 0, 0, tmp.width, tmp.height);
+    tctx.filter = "blur(1px)";
+    tctx.drawImage(video, cx, cy, cw, ch, 0, 0, bw, bh);
     tctx.filter = "none";
 
-    // step 2 — downscale toward ~1100px wide; text lands near the size OCR likes
-    var sc = Math.min(1, 1100 / tmp.width);
-    var ow = Math.max(1, Math.round(tmp.width * sc));
-    var oh = Math.max(1, Math.round(tmp.height * sc));
-    work.width = ow; work.height = oh;
+    // grayscale of the band
+    var bd = tctx.getImageData(0, 0, bw, bh).data;
+    var gray = new Float32Array(bw * bh), i, j, x, y;
+    for(i = 0, j = 0; i < bd.length; i += 4, j++){
+      gray[j] = 0.299*bd[i] + 0.587*bd[i+1] + 0.114*bd[i+2];
+    }
+
+    // locate the text row: rows of text have high horizontal-gradient energy
+    var rowE = new Float64Array(bh), base, s, d;
+    for(y = 0; y < bh; y++){
+      base = y*bw; s = 0;
+      for(x = 1; x < bw; x++){ d = gray[base+x] - gray[base+x-1]; s += d < 0 ? -d : d; }
+      rowE[y] = s;
+    }
+    var sm = new Float64Array(bh), R = 4, acc, cnt, k, yy;
+    for(y = 0; y < bh; y++){
+      acc = 0; cnt = 0;
+      for(k = -R; k <= R; k++){ yy = y+k; if(yy >= 0 && yy < bh){ acc += rowE[yy]; cnt++; } }
+      sm[y] = acc / cnt;
+    }
+    var peak = 0, pv = -1;
+    for(y = 0; y < bh; y++){ if(sm[y] > pv){ pv = sm[y]; peak = y; } }
+    var top = peak, bot = peak, rthr = pv * 0.35;
+    while(top > 0 && sm[top] > rthr) top--;
+    while(bot < bh-1 && sm[bot] > rthr) bot++;
+    var pad = Math.round((bot - top) * 0.4);
+    top = Math.max(0, top - pad); bot = Math.min(bh, bot + pad);
+    var rowH = bot - top;
+    if(rowH < 6){ top = 0; bot = bh; rowH = bh; }   // fallback: whole band
+
+    // upscale the cropped row to ~88px tall (good for tesseract)
+    var scale = 88 / rowH; if(scale > 3) scale = 3; if(scale < 0.5) scale = 0.5;
+    var dw = Math.max(1, Math.round(bw * scale)), dh = Math.max(1, Math.round(rowH * scale));
+    work.width = dw; work.height = dh;
     var ctx = work.getContext("2d");
     ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(tmp, 0, 0, tmp.width, tmp.height, 0, 0, ow, oh);
+    ctx.drawImage(tmp, 0, top, bw, rowH, 0, 0, dw, dh);
 
-    // step 3 — grayscale
-    var img = ctx.getImageData(0, 0, ow, oh), p = img.data;
-    var n = ow * oh;
-    var gray = new Float32Array(n);
-    for(var i = 0, j = 0; i < p.length; i += 4, j++){
-      gray[j] = 0.299*p[i] + 0.587*p[i+1] + 0.114*p[i+2];
+    // grayscale + global Otsu threshold
+    var img = ctx.getImageData(0, 0, dw, dh), p = img.data, n = dw*dh;
+    var g2 = new Float32Array(n);
+    for(i = 0, j = 0; i < p.length; i += 4, j++){
+      g2[j] = 0.299*p[i] + 0.587*p[i+1] + 0.114*p[i+2];
     }
-
-    // step 3b — polarity: the adaptive threshold below expects dark-on-light.
-    // Screens come in both polarities and auto-detecting from one noisy frame
-    // is unreliable, so the loop alternates `forceInvert` every frame — one
-    // polarity reads the serial, the other yields nothing and is ignored by
-    // the consensus vote. Robust to dark- and light-background screens alike.
-    if(forceInvert){
-      for(var gi = 0; gi < n; gi++){ gray[gi] = 255 - gray[gi]; }
+    var hist = new Float64Array(256), gi, t;
+    for(gi = 0; gi < n; gi++){ hist[g2[gi] & 255]++; }
+    var sumAll = 0; for(t = 0; t < 256; t++) sumAll += t * hist[t];
+    var wB = 0, sB = 0, maxv = -1, thr = 128, wF, mB, mF, bt;
+    for(t = 0; t < 256; t++){
+      wB += hist[t]; if(wB === 0) continue;
+      wF = n - wB; if(wF === 0) break;
+      sB += t * hist[t]; mB = sB/wB; mF = (sumAll - sB)/wF;
+      bt = wB * wF * (mB - mF) * (mB - mF);
+      if(bt > maxv){ maxv = bt; thr = t; }
     }
-
-    // step 4 — adaptive (local-mean) threshold via integral image; robust to
-    // the dark bezel / bright screen gradient inside the band
-    var W = ow + 1;
-    var integ = new Float64Array(W * (oh + 1));
-    for(var y = 0; y < oh; y++){
-      var rowsum = 0;
-      for(var x = 0; x < ow; x++){
-        rowsum += gray[y*ow + x];
-        integ[(y+1)*W + (x+1)] = integ[y*W + (x+1)] + rowsum;
-      }
-    }
-    var win = Math.max(15, Math.round(oh * 0.25) | 1);
-    var half = win >> 1, C = 12;
-    for(var yy = 0; yy < oh; yy++){
-      var y0 = yy-half < 0 ? 0 : yy-half;
-      var y1 = yy+half >= oh ? oh-1 : yy+half;
-      for(var xx = 0; xx < ow; xx++){
-        var x0 = xx-half < 0 ? 0 : xx-half;
-        var x1 = xx+half >= ow ? ow-1 : xx+half;
-        var area = (x1-x0+1) * (y1-y0+1);
-        var sum = integ[(y1+1)*W+(x1+1)] - integ[y0*W+(x1+1)] - integ[(y1+1)*W+x0] + integ[y0*W+x0];
-        var mean = sum / area;
-        var v = gray[yy*ow+xx] > (mean - C) ? 255 : 0;
-        var k = (yy*ow+xx) * 4;
-        p[k] = p[k+1] = p[k+2] = v; p[k+3] = 255;
-      }
+    // background is the majority class → make the minority (text) black
+    var dark = 0;
+    for(gi = 0; gi < n; gi++){ if(g2[gi] <= thr) dark++; }
+    var invert = dark > n - dark;
+    grabProcessed.lastInvert = invert;
+    for(gi = 0, i = 0; gi < n; gi++, i += 4){
+      var vv = ((g2[gi] <= thr) !== invert) ? 0 : 255;
+      p[i] = p[i+1] = p[i+2] = vv; p[i+3] = 255;
     }
     ctx.putImageData(img, 0, 0);
     return work;
@@ -494,17 +507,15 @@
   function tick(){
     if(!looping) return;
     if(!workerReady || busy){ setTimeout(tick, 200); return; }
-    forceInvert = !forceInvert;          // alternate polarity each frame
     var rawBand = grabRawBand();
     var canvas = grabProcessed();
     if(!canvas){ setTimeout(tick, 200); return; }
     busy = true;
-    var inv = forceInvert;
     worker.recognize(canvas).then(function(res){
       busy = false;
       var raw = (res.data.text||"").trim();
       var serial = extractSerial(raw);
-      logFrame(rawBand, snapshot(canvas), raw, serial, inv);
+      logFrame(rawBand, snapshot(canvas), raw, serial, grabProcessed.lastInvert);
       handleReading(serial, raw);
       if(looping) setTimeout(tick, 120);
     }).catch(function(e){
