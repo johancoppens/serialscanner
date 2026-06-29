@@ -122,6 +122,12 @@
   .dbgbody{padding:14px}
   .dbgsub{font-size:12px;color:var(--ink-2);margin:0 0 10px;line-height:1.5}
   #logBtn{font-family:var(--mono);font-size:14px;font-weight:700;padding:11px 14px;border:2px solid var(--ink);background:var(--ink);color:var(--paper);cursor:pointer;width:100%}
+  #refText{width:100%;min-height:90px;font-family:var(--mono);font-size:13px;padding:10px;border:1px solid var(--line);resize:vertical}
+  .refbtns{display:flex;gap:8px;margin-top:8px}
+  .reffile,#refApply{font-family:var(--mono);font-size:13px;font-weight:700;padding:10px 12px;border:2px solid var(--ink);cursor:pointer;text-align:center}
+  .reffile{background:#fff;color:var(--ink)}
+  #refApply{background:var(--ink);color:var(--paper);flex:1}
+  .refstat{font-family:var(--mono);font-size:12px;color:var(--good);margin:8px 0 0}
 
   /* ---- manual ---- */
   .manual{display:flex;gap:8px;margin:14px 16px 0}
@@ -184,6 +190,19 @@
     <button id="manualBtn">＋</button>
   </div>
 
+  <details class="dbg" id="refPanel">
+    <summary>▸ Referentielijst koppelen (Admin Console export) — lost 0/O, 3/S op</summary>
+    <div class="dbgbody">
+      <p class="dbgsub">Plak hier je serienummers uit de Google Admin Console-export (één per regel of CSV). Elke scan wordt dan automatisch naar het dichtstbijzijnde bekende serienummer “geklikt”, zodat OCR-foutjes (0/O, 3/S) vanzelf juist komen.</p>
+      <textarea id="refText" placeholder="5CD124PXZL&#10;PF3JF0NA&#10;…"></textarea>
+      <div class="refbtns">
+        <label class="reffile">CSV/TXT kiezen<input type="file" id="refFile" accept=".csv,.txt" hidden></label>
+        <button id="refApply">Lijst laden</button>
+      </div>
+      <p class="refstat" id="refStat"></p>
+    </div>
+  </details>
+
   <details class="dbg">
     <summary>▸ Debug / log voor diagnose</summary>
     <div class="dbgbody">
@@ -214,7 +233,10 @@
 
   // ---------- state ----------
   var STORE_KEY = "cb-serial-scanner-v1";
-  var rows = [];            // {serial, batch, source, raw, ts}
+  var rows = [];            // {serial, batch, source, raw, ts, matched}
+  var master = [];          // normalized reference serials
+  var masterRaw = [];       // original reference serials
+  var MATCH_MIN = 0.6;      // min similarity to snap an OCR read to a known serial
   var worker = null, workerReady = false, stream = null;
 
   // auto-scan + consensus voting
@@ -238,7 +260,7 @@
   function save(){
     try{
       localStorage.setItem(STORE_KEY, JSON.stringify({
-        rows: rows, batch: $("batch").value
+        rows: rows, batch: $("batch").value, masterRaw: masterRaw
       }));
     }catch(e){ /* storage unavailable — in-memory only */ }
   }
@@ -249,6 +271,7 @@
       var d = JSON.parse(raw);
       if(d.rows) rows = d.rows;
       if(d.batch) $("batch").value = d.batch;
+      if(d.masterRaw && d.masterRaw.length) setMaster(d.masterRaw);
     }catch(e){ /* ignore */ }
   }
 
@@ -262,7 +285,59 @@
 
   function updateCount(){
     $("count").firstChild.nodeValue = rows.length + " ";
-    $("countSub").textContent = "gescand";
+    $("countSub").textContent = masterRaw.length ? ("/ " + masterRaw.length) : "gescand";
+  }
+
+  // ---------- reference list (Admin Console export) ----------
+  // Levenshtein distance
+  function lev(a, b){
+    var m = a.length, n = b.length, i, j;
+    if(!m) return n; if(!n) return m;
+    var prev = new Array(n+1), cur = new Array(n+1);
+    for(j = 0; j <= n; j++) prev[j] = j;
+    for(i = 1; i <= m; i++){
+      cur[0] = i;
+      for(j = 1; j <= n; j++){
+        var cost = a.charCodeAt(i-1) === b.charCodeAt(j-1) ? 0 : 1;
+        cur[j] = Math.min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost);
+      }
+      var tmp = prev; prev = cur; cur = tmp;
+    }
+    return prev[n];
+  }
+  // closest reference serial for an OCR read → {serial, score} or null
+  function bestMatch(ocr){
+    var q = norm(ocr);
+    if(!q || !master.length) return null;
+    var best = null, bestScore = -1, second = -1;
+    for(var i = 0; i < master.length; i++){
+      var m = master[i];
+      var d = lev(q, m);
+      var score = 1 - d / (Math.max(q.length, m.length) || 1);
+      if(score > bestScore){ second = bestScore; bestScore = score; best = masterRaw[i]; }
+      else if(score > second){ second = score; }
+    }
+    return { serial: best, score: bestScore, margin: bestScore - second };
+  }
+  function parseMaster(text){
+    var out = [];
+    text.split(/[\r\n]+/).forEach(function(line){
+      var cells = line.split(/[;,\t]/), picked = "";
+      for(var i = 0; i < cells.length; i++){
+        var c = cells[i].trim();
+        if(/[A-Za-z0-9]{5,}/.test(c)){ picked = c; break; }
+      }
+      if(!picked) picked = line.trim();
+      if(picked && norm(picked).length >= 4) out.push(picked.trim());
+    });
+    return out;
+  }
+  function setMaster(arr){
+    masterRaw = arr.slice();
+    master = arr.map(norm);
+    if($("refStat")) $("refStat").textContent = master.length + " serienummers geladen — matching staat aan.";
+    if($("refText") && !$("refText").value) $("refText").value = masterRaw.join("\n");
+    updateCount();
   }
 
   // ---------- camera ----------
@@ -537,6 +612,13 @@
   }
 
   function handleReading(serial, raw){
+    var matched = false;
+    // snap the OCR read to the nearest known serial so 0/O, 3/S etc. are fixed
+    if(serial && master.length){
+      var m = bestMatch(serial);
+      if(m && m.score >= MATCH_MIN){ serial = norm(m.serial); matched = true; }
+    }
+
     recent.push(serial);
     if(recent.length > WINDOW) recent.shift();
 
@@ -552,21 +634,21 @@
     for(var i = 0; i < recent.length; i++){ if(recent[i] === serial) votes++; }
 
     if(serial === lastAccepted){
-      setLive("Al toegevoegd: " + serial, "hit");
+      setLive((matched ? "✓ " : "") + "Al toegevoegd: " + serial, "hit");
       return;
     }
-    setLive("Gelezen: " + serial + "  (" + votes + "/" + NEED + ")", "active");
+    setLive((matched ? "✓ lijst: " : "Gelezen: ") + serial + "  (" + votes + "/" + NEED + ")", "active");
 
     if(votes >= NEED){
       lastAccepted = serial; recent = [];
-      autoAdd(serial, raw);
+      autoAdd(serial, raw, matched);
     }
   }
 
-  function autoAdd(serial, raw){
+  function autoAdd(serial, raw, matched){
     serial = norm(serial);
     if(!serial) return;
-    addRow(serial, "ocr", raw);
+    addRow(serial, "ocr", raw, matched);
     beep();
     if(navigator.vibrate) navigator.vibrate(120);
     setLive("✓ Toegevoegd: " + serial, "hit");
@@ -585,10 +667,10 @@
   }
 
   // ---------- rows ----------
-  function addRow(serial, source, raw){
+  function addRow(serial, source, raw, matched){
     rows.unshift({
       serial: serial, batch: $("batch").value.trim(),
-      source: source, raw: raw||"", ts: new Date().toISOString()
+      source: source, raw: raw||"", matched: !!matched, ts: new Date().toISOString()
     });
     save(); render();
   }
@@ -618,8 +700,9 @@
     rows.forEach(function(r, idx){
       var row = document.createElement("div");
       row.className = "row" + (isDupe(r.serial, idx) ? " dupe":"");
-      var tag = r.source==="handmatig" ? '<span class="tag h">handm.</span>'
-              : (r.source==="ocr-gecorrigeerd" ? '<span class="tag m">✎ ocr</span>' : '<span class="tag o">ocr</span>');
+      var tag = r.matched ? '<span class="tag m">✓ lijst</span>'
+              : (r.source==="handmatig" ? '<span class="tag h">handm.</span>'
+              : (r.source==="ocr-gecorrigeerd" ? '<span class="tag m">✎ ocr</span>' : '<span class="tag o">ocr</span>'));
       var dupe = isDupe(r.serial, idx) ? '<span class="tag h">dubbel</span>' : '';
       row.innerHTML =
         '<span class="serial" title="tik om te corrigeren">'+escapeHtml(r.serial)+'</span>'+
@@ -643,12 +726,12 @@
   }
   $("csvBtn").addEventListener("click", function(){
     if(!rows.length){ toast("Niets om te exporteren"); return; }
-    var header = ["serienummer","bestemming","bron","ocr_ruw","tijdstip"];
+    var header = ["serienummer","bestemming","bron","in_lijst","ocr_ruw","tijdstip"];
     var lines = [header.join(",")];
     // export oldest-first for readability
     rows.slice().reverse().forEach(function(r){
       lines.push([ csvCell(r.serial), csvCell(r.batch), csvCell(r.source),
-                   csvCell(r.raw), csvCell(r.ts) ].join(","));
+                   r.matched?"ja":"nee", csvCell(r.raw), csvCell(r.ts) ].join(","));
     });
     var blob = new Blob(["\uFEFF"+lines.join("\r\n")], {type:"text/csv;charset=utf-8"});
     var d = new Date(), pad=function(n){return (n<10?"0":"")+n;};
@@ -671,6 +754,19 @@
   $("logBtn").addEventListener("click", function(){
     if(!logFrames.length && !logOther.length){ toast("Nog geen frames — start de camera en scan eerst even"); return; }
     downloadLog();
+  });
+
+  // ---------- reference list wiring ----------
+  $("refApply").addEventListener("click", function(){
+    var arr = parseMaster($("refText").value);
+    if(!arr.length){ toast("Geen serienummers gevonden"); return; }
+    setMaster(arr); save(); toast(arr.length + " geladen");
+  });
+  $("refFile").addEventListener("change", function(e){
+    var f = e.target.files[0]; if(!f) return;
+    var r = new FileReader();
+    r.onload = function(){ $("refText").value = r.result; };
+    r.readAsText(f);
   });
 
   $("batch").addEventListener("input", save);
