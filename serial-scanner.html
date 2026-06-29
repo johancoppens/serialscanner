@@ -225,9 +225,10 @@
   var audioCtx = null;
 
   // debug log (downloadable, to share for diagnosis)
-  var logFrames = [];       // ring buffer of {raw, proc, text, serial, inv, ts}
-  var logEntries = [];      // text-only history of OCR attempts
-  var LOG_FRAMES = 6, LOG_ENTRIES = 80;
+  var logFrames = [];       // frames where a serial WAS read (most useful)
+  var logOther = [];        // a few recent non-empty-but-no-serial frames
+  var logEntries = [];      // text-only history of every OCR attempt
+  var LOG_FRAMES = 6, LOG_OTHER = 3, LOG_ENTRIES = 80;
 
   var $ = function(id){ return document.getElementById(id); };
   var video = $("video"), stage = $("stage"), work = $("work");
@@ -452,21 +453,31 @@
   }
   function logFrame(rawC, procC, text, serial, inv){
     var ts = new Date().toISOString();
-    logFrames.push({ raw: rawC, proc: procC, text: text, serial: serial, inv: inv, ts: ts });
-    while(logFrames.length > LOG_FRAMES) logFrames.shift();
     logEntries.push({ ts: ts, inv: inv, serial: serial, raw: text });
     while(logEntries.length > LOG_ENTRIES) logEntries.shift();
+    var frame = { raw: rawC, proc: procC, text: text, serial: serial, inv: inv, ts: ts };
+    // keep the frames that actually read a serial; otherwise a few recent
+    // non-empty frames — so the download isn't just trailing blank frames.
+    if(serial){
+      logFrames.push(frame);
+      while(logFrames.length > LOG_FRAMES) logFrames.shift();
+    }else if(text){
+      logOther.push(frame);
+      while(logOther.length > LOG_OTHER) logOther.shift();
+    }
   }
   function downloadLog(){
+    var allFrames = logFrames.concat(logOther);
     var meta = "tijd: " + new Date().toISOString() +
       "\nuserAgent: " + navigator.userAgent +
       "\nvideo: " + (video.videoWidth||"?") + " x " + (video.videoHeight||"?") +
-      "\nframes: " + logFrames.length + "  pogingen: " + logEntries.length;
+      "\nframes met serial: " + logFrames.length + "  overige frames: " + logOther.length +
+      "  pogingen: " + logEntries.length;
     var rows = logEntries.slice().reverse().map(function(e){
       return "<tr><td>"+escapeHtml(e.ts)+"</td><td>"+(e.inv?"inv":"norm")+
         "</td><td><b>"+escapeHtml(e.serial||"—")+"</b></td><td>"+escapeHtml(e.raw||"")+"</td></tr>";
     }).join("");
-    var frames = logFrames.slice().reverse().map(function(f, i){
+    var frames = allFrames.slice().reverse().map(function(f, i){
       var rawSrc = f.raw ? f.raw.toDataURL("image/png") : "";
       var procSrc = f.proc ? f.proc.toDataURL("image/png") : "";
       return "<div class=f><div class=cap>#"+i+" "+escapeHtml(f.ts)+" ["+(f.inv?"inv":"norm")+
@@ -493,7 +504,7 @@
     a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
-    toast("Log gedownload (" + logFrames.length + " frames)");
+    toast("Log gedownload (" + allFrames.length + " frames)");
   }
 
   // ---------- auto-scan loop ----------
@@ -646,7 +657,7 @@
   });
 
   $("logBtn").addEventListener("click", function(){
-    if(!logFrames.length){ toast("Nog geen frames — start de camera en scan eerst even"); return; }
+    if(!logFrames.length && !logOther.length){ toast("Nog geen frames — start de camera en scan eerst even"); return; }
     downloadLog();
   });
 
